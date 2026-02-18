@@ -1,0 +1,180 @@
+
+"""
+
+JinaEmbeddingAdapter - Jina API'yi IEmbeddingService interface'ine adapt et
+
+Async-first implementation with connection pooling
+
+"""
+
+import httpx
+
+import logging
+
+from typing import List, Optional
+
+from app_refactored.core.interfaces import IEmbeddingService
+ 
+logger = logging.getLogger(__name__)
+ 
+ 
+class JinaEmbeddingAdapter(IEmbeddingService):
+
+    """Jina Embedding API async adapter with connection pooling"""
+ 
+    def __init__(
+
+        self,
+
+        host: str,
+
+        port: int,
+
+        model: str,
+
+        timeout: int = 600,
+
+        max_connections: int = 10
+
+    ):
+
+        """
+
+        Initialize Jina adapter with async client
+
+        Args:
+
+            host: Jina API host (örn: "http://10.144.100.204")
+
+            port: Jina API port (örn: 38001)
+
+            model: Model adı (örn: "jinaai/jina-embeddings-v4")
+
+            timeout: Request timeout (saniye)
+
+            max_connections: Connection pool maksimum bağlantı sayısı
+
+        """
+
+        self.host = host
+
+        self.port = port
+
+        self.model = model
+
+        self.timeout = timeout
+
+        self.endpoint = f"{host}:{self.port}/embed/text"
+
+        self.health_endpoint = f"{host}:{self.port}/health"
+
+        self.dimension = 2048  # Jina v4 default dimension
+
+        # AsyncClient with connection pooling
+
+        self.client = httpx.AsyncClient(
+
+            timeout=httpx.Timeout(timeout),
+
+            limits=httpx.Limits(
+
+                max_connections=max_connections,
+
+                max_keepalive_connections=max_connections
+
+            )
+
+        )
+ 
+    async def embed_text(self, text: str) -> List[float]:
+
+        """Tek metni embed et"""
+
+        embeddings = await self.embed_batch([text])
+
+        return embeddings[0] if embeddings else []
+ 
+    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+
+        """Birden fazla metni batch olarak embed et - async implementation"""
+
+        try:
+
+            payload = {
+
+                "model": self.model,
+
+                "texts": texts
+
+            }
+
+            response = await self.client.post(
+
+                self.endpoint,
+
+                json=payload
+
+            )
+
+            response.raise_for_status()
+
+            result = response.json()
+
+            embeddings = result.get("embeddings", [])
+
+            logger.info(f"✅ Generated {len(embeddings)} embeddings")
+
+            return embeddings
+
+        except Exception as e:
+
+            logger.error(f"❌ Embedding failed: {str(e)}")
+
+            raise
+ 
+    async def get_dimension(self) -> int:
+
+        """Embedding boyutunu döndür"""
+
+        return self.dimension
+ 
+    async def is_available(self) -> bool:
+
+        """Jina servisinin çalışıp çalışmadığını kontrol et - async"""
+
+        try:
+
+            response = await self.client.get(
+
+                self.health_endpoint,
+
+                timeout=httpx.Timeout(5)
+
+            )
+
+            return response.status_code == 200
+
+        except Exception as e:
+
+            logger.warning(f"Jina health check failed: {str(e)}")
+
+            return False
+ 
+    async def close(self):
+
+        """Client bağlantısını kapat"""
+
+        await self.client.aclose()
+ 
+    async def __aenter__(self):
+
+        """Context manager support"""
+
+        return self
+ 
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+
+        """Context manager cleanup"""
+
+        await self.close()
+ 
