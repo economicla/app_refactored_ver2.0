@@ -411,6 +411,14 @@ class DocumentIngestionUseCase:
         try:
 
             logger.info(f"📥 Ingesting: {filename}")
+
+            # Step 0: Aynı dosyanın eski chunk'larını temizle (re-upload desteği)
+            try:
+                deleted_count = await self.document_repository.delete_by_filename(filename)
+                if deleted_count > 0:
+                    logger.info(f"🗑️ Deleted {deleted_count} old chunks for {filename}")
+            except Exception as del_err:
+                logger.warning(f"⚠️ Old chunk cleanup failed (continuing): {del_err}")
  
             # Step 1: Metni çıkart
 
