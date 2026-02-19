@@ -781,6 +781,73 @@ async def preview_html_conversion(
             except:
                 pass
 
+
+
+@router.post("/debug-query")
+async def debug_query(
+    request: RAGQueryRequest,
+    container: DIContainer = Depends(get_di_container)
+):
+    """
+    DEBUG: RAG sorgusunun LLM'e gönderilmeden önceki halini gösterir.
+    - Retrieve edilen chunk'ların tam içeriğini
+    - Oluşturulan prompt'u
+    - Embedding ve similarity score bilgilerini gösterir.
+    LLM çağrısı YAPMAZ.
+    """
+    try:
+        logger.info(f"🔍 DEBUG Query: {request.query[:80]}")
+
+        # Embedding
+        embedding_svc = container.get_embedding_service()
+        query_embedding = await embedding_svc.embed_text(request.query)
+
+        # Search
+        doc_repo = container.get_document_repository()
+        search_result = await doc_repo.search_similar(
+            embedding=query_embedding,
+            top_k=request.top_k,
+            threshold=0.0
+        )
+
+        # Build context (same logic as RAGQueryUseCase)
+        context_parts = []
+        chunks_detail = []
+        for idx, doc in enumerate(search_result.documents):
+            header = doc.metadata.get('header') if hasattr(doc, 'metadata') and doc.metadata else None
+            header_text = f" [{header}]" if header else ""
+            context_parts.append(
+                f"[Kaynak {idx+1}: {doc.filename}{header_text}]\n{doc.content}"
+            )
+            chunks_detail.append({
+                "index": idx,
+                "filename": doc.filename,
+                "chunk_index": doc.chunk_index,
+                "header": header,
+                "similarity_score": getattr(doc, 'similarity_score', 0),
+                "content_length": len(doc.content),
+                "full_content": doc.content
+            })
+
+        context = "\n\n---\n\n".join(context_parts)
+        prompt = f"""KONTEXT (Yalnızca aşağıdaki bilgiyi kullan):
+{context}
+
+SORU: {request.query}
+
+YANIT (kesin, kaynaklı ve profesyonel):"""
+
+        return {
+            "query": request.query,
+            "chunks_retrieved": len(search_result.documents),
+            "chunks_detail": chunks_detail,
+            "full_prompt_length": len(prompt),
+            "full_prompt": prompt
+        }
+    except Exception as e:
+        logger.error(f"❌ Debug query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
  
 @router.post("/ingest-with-metadata")
 
