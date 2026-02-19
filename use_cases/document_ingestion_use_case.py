@@ -33,6 +33,7 @@ from app_refactored.core.entities import (
 
 from .document_preprocessing import DocumentPreprocessor
 from .intelligent_chunking import IntelligentChunker
+from .html_structured_converter import HTMLStructuredConverter
  
 logger = logging.getLogger(__name__)
  
@@ -322,43 +323,12 @@ class DocumentIngestionUseCase:
 
             raise
 
-    def _format_table_rows(self, rows_data):
-        """ Tablo satırlarını LLM-dostu formata çevir"""
-        if not rows_data:
-            return []
-
-        lines = []
-        header = None
-
-        for texts in rows_data:
-            if not header:
-                # İlk satır = sütun başlıkları
-                header = texts
-                continue
-
-            if len(texts) == len(header):
-                # Her değeri başlığıyla eşleştir
-                parts = []
-                label = texts[0]
-                for j in range(1, len(texts)):
-                    if texts[j]:
-                        parts.append(f"{header[j]}={texts[j]}")
-                if parts:
-                    lines.append(f"{label}: {', '.join(parts)}")
-                else:
-                    lines.append(label)
-            else:
-                lines.append(", ".join(texts))
-        return lines
-
     def _extract_html(self, file_path: str) -> str:
 
-        """HTML'den metin çıkart - 3 farklı formatı otomatik tespit eder"""
+        """HTML'den metin çıkart - HTMLStructuredConverter ile yapısal parse"""
 
         try:
 
-            from bs4 import BeautifulSoup
- 
             html_content = None
 
             for enc in ('utf-8', 'windows-1254', 'latin-1', 'iso-8859-9'):
@@ -382,240 +352,12 @@ class DocumentIngestionUseCase:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
 
                     html_content = file.read()
- 
-            soup = BeautifulSoup(html_content, "html.parser")
- 
-            for tag in soup(["script", "style", "meta", "link"]):
 
-                tag.decompose()
- 
-            sections = []
- 
-            # ── FORMAT 1: <tbody id="..."> yapısı (Teklif) ──
+            converter = HTMLStructuredConverter()
 
-            tbodies_with_id = soup.find_all("tbody", id=True)
+            result = converter.convert(html_content)
 
-            if tbodies_with_id:
-
-                logger.info("📋 Format 1: Teklif (tbody id)")
-
-                for tbody in tbodies_with_id:
-
-                    section_id = tbody.get("id")
-
-                    section_lines = [f"## {section_id}"]
- 
-                    # tbody içindeki tabloları işle
-
-                    rows = tbody.find_all("tr")
-
-                    for row in rows:
-
-                        cells = row.find_all(["td", "th"])
-
-                        texts = [c.get_text(strip=True) for c in cells]
-
-                        texts = [t for t in texts if t]
-
-                        if texts:
-
-                            if len(texts) == 1:
-
-                                section_lines.append(texts[0])
-
-                            elif len(texts) == 2:
-
-                                section_lines.append(f"- {texts[0]}: {texts[1]}")
-
-                            else:
-
-                                section_lines.append("| " + " | ".join(texts) + " |")
- 
-                    # tbody içindeki div'leri de al (serbest metin: görüşler, öneriler)
-
-                    for div in tbody.find_all("div"):
-
-                        div_text = div.get_text(strip=True)
-
-                        if div_text and len(div_text) > 10:
-
-                            # Numaralı bölüm mü? (1) FİRMA TANITIMI gibi)
-
-                            if div_text[0].isdigit() and ')' in div_text[:5]:
-
-                                section_lines.append(f"\n### {div_text}")
-
-                            else:
-
-                                section_lines.append(div_text)
- 
-                    if len(section_lines) > 1:  # Sadece başlık değilse ekle
-
-                        sections.append("\n".join(section_lines))
- 
-            # ── FORMAT 2: <div class="dl-bold"> yapısı (Performans) ──
-
-            elif soup.find("div", class_=lambda c: c and "dl-bold" in c):
-
-                logger.info("📋 Format 2: Performans (div dl-bold)")
-
-                bold_divs = soup.find_all("div", class_=lambda c: c and "dl-bold" in c)
- 
-                for div in bold_divs:
-
-                    title = div.get_text(strip=True)
-
-                    if not title:
-
-                        continue
-
-                    section_lines = [f"## {title}"]
- 
-                    # Bu div'den sonraki table'ı bul
-
-                    table = div.find_next_sibling("table")
-
-                    if not table:
-
-                        table = div.find_next("table")
-
-                    if table:
-
-                        rows = table.find_all("tr")
-
-                        header_done = False
-
-                        for row in rows:
-
-                            cells = row.find_all(["td", "th"])
-
-                            texts = [c.get_text(strip=True) for c in cells]
-
-                            texts = [t for t in texts if t]
-
-                            if not texts:
-
-                                continue
-
-                            if len(texts) == 2:
-
-                                section_lines.append(f"- {texts[0]}: {texts[1]}")
-
-                            elif len(texts) > 2:
-
-                                section_lines.append("| " + " | ".join(texts) + " |")
-
-                                if not header_done:
-
-                                    section_lines.append("| " + " | ".join(["---"] * len(texts)) + " |")
-
-                                    header_done = True
-
-                            else:
-
-                                section_lines.append(texts[0])
- 
-                    sections.append("\n".join(section_lines))
- 
-            # ── FORMAT 3: Düz tablolar (Mali Veri / Bilanço) ──
-
-            else:
-
-                logger.info("📋 Format 3: Mali Veri (düz tablolar)")
-
-                top_tables = [t for t in soup.find_all('table') if not t.find_parent('table')]
- 
-                for table in top_tables:
-
-                    # Tüm metni al (iç içe tablolar dahil)
-
-                    all_rows = table.find_all("tr")
-
-                    section_lines = []
- 
-                    for row in all_rows:
-
-                        cells = row.find_all(["td", "th"])
-
-                        texts = [c.get_text(strip=True) for c in cells if not c.find("table")]
-
-                        texts = [t for t in texts if t]
-
-                        if not texts:
-
-                            continue
- 
-                        # Bold hücre = bölüm başlığı
-
-                        first_cell = cells[0] if cells else None
-
-                        is_bold = False
-
-                        if first_cell:
-
-                            style = first_cell.get("style", "")
-
-                            if "font-weight" in style and "bold" in style:
-
-                                is_bold = True
-
-                            if first_cell.find("b") or first_cell.find("strong"):
-
-                                is_bold = True
-
-                            bg = first_cell.get("style", "")
-
-                            if "background-color" in bg and len(texts) <= 2:
-
-                                is_bold = True
- 
-                        if is_bold and len(texts) <= 2:
-
-                            section_lines.append(f"\n## {texts[0]}")
-
-                        elif len(texts) == 2:
-
-                            section_lines.append(f"- {texts[0]}: {texts[1]}")
-
-                        elif len(texts) > 2:
-
-                            section_lines.append("| " + " | ".join(texts) + " |")
-
-                        else:
-
-                            section_lines.append(texts[0])
- 
-                    if section_lines:
-
-                        sections.append("\n".join(section_lines))
- 
-            # Fallback
-
-            if not sections:
-
-                sections.append(soup.get_text(separator="\n", strip=True))
- 
-            result = "\n\n---\n\n".join(sections)
-
-            # --- Pipe table -> LLM-friendly format converter
-            converted_lines = []
-            table_buffer = []
-            for line in result.split("\n"):
-                stripped = line.strip()
-                if stripped.startswith("|") and stripped.endswith("|"):
-                    cells = [c.strip() for c in stripped.strip("|").split("|")]
-                    table_buffer.append(cells)
-                else:
-                    if table_buffer:
-                        converted_lines.extend(self._format_table_rows(table_buffer))
-                        table_buffer = []
-                    converted_lines.append(line)
-            if table_buffer:
-                converted_lines.extend(self._format_table_rows(table_buffer))
-            result = "\n".join(converted_lines)
-            # --- End converter ---
-            
-            logger.info(f"✅ HTML extraction: {len(result)} chars, {len(sections)} sections")
+            logger.info(f"✅ HTML extraction: {len(result)} chars")
 
             return result
 
