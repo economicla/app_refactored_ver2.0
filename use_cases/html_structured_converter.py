@@ -177,44 +177,75 @@ class HTMLStructuredConverter:
 
         return col_to_pcn
 
+    def _find_header_row(self, trs: List[Tag]) -> Tuple[int, List[str]]:
+        """
+        TR listesinde gerçek header satırını bul.
+        Tek hücreli title/colspan satırlarını (ör: "LİMİT BİLGİLERİ") atlar,
+        3+ hücreli ilk satırı header olarak döndürür.
+
+        Returns:
+            (header_index, header_texts) — bulunamazsa (-1, [])
+        """
+        for idx, tr in enumerate(trs):
+            cells = tr.find_all(["td", "th"], recursive=False)
+            texts = [c.get_text(strip=True) for c in cells]
+            # 3+ hücre olan ilk satır = header
+            if len(texts) >= 3:
+                return idx, texts
+        return -1, []
+
     def _parse_trs_smart(self, trs: List[Tag], section_title: str = "") -> str:
         """
         TR listesini PCN-aware olarak parse edip doğal dil metnine dönüştürür.
 
+        Tek hücreli title satırlarını otomatik atlar ve gerçek header satırını bulur.
         Her satır bağımsız, kendi içinde tam bilgi içerir:
           "UMUMI: Risk 1.346.045.880 TRY, Mevcut Limit 2.025.000.000 TRY"
 
         Args:
-            trs: <tr> Tag listesi (ilk satır header kabul edilir)
+            trs: <tr> Tag listesi
             section_title: Bölüm başlığı (opsiyonel)
         """
         if not trs:
             return ""
 
-        # Header tespiti
-        header_cells = trs[0].find_all(["td", "th"], recursive=False)
-        headers = [c.get_text(strip=True) for c in header_cells]
+        lines: List[str] = []
+        if section_title:
+            lines.append(f"## {section_title}")
 
-        if not headers or len(headers) < 2:
+        # ── Header satırını bul (tek hücreli title satırlarını atla) ──
+        header_idx, headers = self._find_header_row(trs)
+
+        if header_idx < 0:
+            # Hiç multi-cell satır yok → basit parse
             return self._parse_simple_trs(trs, section_title)
 
-        # PCN eşlemesini oluştur
-        pcn_indices = set()
+        # Header öncesi title satırlarını ekle
+        for tr in trs[:header_idx]:
+            title_text = tr.get_text(strip=True)
+            if title_text:
+                lines.append(f"### {title_text}")
+
+        # ── PCN eşlemesini oluştur ──
+        pcn_indices: Set[int] = set()
         for i, h in enumerate(headers):
             if h.upper().strip().rstrip(".") in self.PCN_KEYWORDS:
                 pcn_indices.add(i)
 
         col_to_pcn = self._build_pcn_map(headers)
 
-        lines: List[str] = []
-        if section_title:
-            lines.append(f"## {section_title}")
-
-        for tr in trs[1:]:
+        # ── Data satırlarını işle (header'dan sonrası) ──
+        for tr in trs[header_idx + 1:]:
             cells = tr.find_all(["td", "th"], recursive=False)
             values = [c.get_text(strip=True) for c in cells]
 
             if not values or not any(v.strip() for v in values):
+                continue
+
+            # Tek hücreli satır → ara başlık/ayraç olabilir
+            if len(values) == 1:
+                if values[0].strip():
+                    lines.append(f"\n### {values[0].strip()}")
                 continue
 
             label = values[0] if values else ""
@@ -263,7 +294,8 @@ class HTMLStructuredConverter:
         return self._parse_trs_smart(rows, section_title)
 
     def _parse_simple_trs(self, trs: List[Tag], section_title: str = "") -> str:
-        """Tek/iki sütunlu basit tabloyu doğal dil metnine dönüştür."""
+        """Tek/iki sütunlu basit tabloyu doğal dil metnine dönüştür.
+        3+ sütunlu satırlar için currency-aware eşleştirme yapar."""
         lines: List[str] = []
         if section_title:
             lines.append(f"## {section_title}")
@@ -280,9 +312,37 @@ class HTMLStructuredConverter:
             elif len(texts) == 2:
                 lines.append(f"{texts[0]}: {texts[1]}")
             else:
-                lines.append(", ".join(texts))
+                # 3+ sütun: currency-aware eşleştirme
+                lines.append(self._flatten_with_currency(texts))
 
         return "\n".join(lines)
+
+    def _flatten_with_currency(self, texts: List[str]) -> str:
+        """
+        Header olmadan bile para birimi kodlarını önceki değerlerle eşleştirir.
+        Giriş: ["ÇEK KARNESİ", "0", "2.000.000", "TRY", "5.000.000", "TRY"]
+        Çıkış: "ÇEK KARNESİ: 0 TRY, 2.000.000 TRY, 5.000.000 TRY"
+        """
+        if not texts:
+            return ""
+
+        label = texts[0]
+        parts: List[str] = []
+        i = 1
+        while i < len(texts):
+            val = texts[i].strip()
+            # Sonraki hücre para birimi kodu mu?
+            if (i + 1 < len(texts)
+                    and texts[i + 1].strip().upper() in self.CURRENCY_CODES):
+                parts.append(f"{val} {texts[i + 1].strip()}")
+                i += 2
+            else:
+                parts.append(val)
+                i += 1
+
+        if parts:
+            return f"{label}: {', '.join(parts)}"
+        return label
 
     # ================================================================
     # FORMAT 1: TEKLİF  (<tbody id="..."> iç içe yapı)
@@ -307,28 +367,10 @@ class HTMLStructuredConverter:
             ]
 
             if own_trs:
-                # Multi-column tablo mu kontrol et
-                first_cells = own_trs[0].find_all(["td", "th"], recursive=False)
-                first_texts = [c.get_text(strip=True) for c in first_cells]
-
-                if len(first_texts) >= 3:
-                    # Multi-column tablo → PCN-aware akıllı parse
-                    table_text = self._parse_trs_smart(own_trs)
-                    if table_text:
-                        section_lines.append(table_text)
-                else:
-                    # Basit 1-2 sütunlu tablo
-                    for tr in own_trs:
-                        cells = tr.find_all(["td", "th"], recursive=False)
-                        texts = [c.get_text(strip=True) for c in cells]
-                        texts = [t for t in texts if t]
-                        if texts:
-                            if len(texts) == 1:
-                                section_lines.append(texts[0])
-                            elif len(texts) == 2:
-                                section_lines.append(f"{texts[0]}: {texts[1]}")
-                            else:
-                                section_lines.append(", ".join(texts))
+                # Her zaman akıllı parse'a gönder — header satırını otomatik bulur
+                table_text = self._parse_trs_smart(own_trs)
+                if table_text:
+                    section_lines.append(table_text)
 
             # ── 2. Bu section'a ait div'leri parse et ──
             own_divs = [
