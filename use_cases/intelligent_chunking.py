@@ -197,6 +197,9 @@ class IntelligentChunker:
                 #Büyük chunk'ı tekrar böl
                 sub_chunks = self._chunk_by_paragraphs(content, header=c['header'])
                 for sub in sub_chunks:
+                    # Sub-chunk da kısa olabilir (ayraç kalıntısı vs.) → filtrele
+                    if len(sub['content'].strip()) < 50:
+                        continue
                     #Header bilgisini koru
                     sub['header'] = c['header']
                     sub['level'] = c['level']
