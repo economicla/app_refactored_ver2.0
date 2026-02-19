@@ -630,8 +630,12 @@ class HTMLStructuredConverter:
 
     def _parse_mali_veri(self, soup: BeautifulSoup) -> List[str]:
         """
-        Mali veri / bilanço formatını parse et.
-        İç içe tablo yapısını tarar, dönem sütunlarını otomatik tespit eder.
+        Mali veri / bilanço / performans (tablo-tabanlı) formatını parse et.
+
+        İç içe tablo yapısını (table > tr > td > table) destekler:
+          - Wrapper TR'ler (tek <td> + nested table) otomatik atlanır
+          - Dönem sütunları bölümler arası taşınır (shared period context)
+          - Başlık bilgi tabloları (firma adı, para birimi vs.) ayrı yakalanır
         """
         sections: List[str] = []
 
@@ -640,14 +644,32 @@ class HTMLStructuredConverter:
             if not t.find_parent("table")
         ]
 
+        # ── Pre-pass: Başlık bilgi tablolarını yakala ──
+        # Sadece tek-hücreli satırlardan oluşan tablolar → doküman meta bilgisi
+        for table in top_tables:
+            trs = table.find_all("tr", recursive=False)
+            if not trs:
+                continue
+            all_single = all(
+                len(tr.find_all(["td", "th"], recursive=False)) <= 1
+                for tr in trs
+            )
+            if all_single:
+                texts = [
+                    tr.get_text(strip=True) for tr in trs
+                    if tr.get_text(strip=True)
+                ]
+                if texts and len(texts) >= 2:
+                    sections.append("\n".join(texts))
+
+        # ── Shared period context across tables/sections ──
+        shared_periods: Dict[int, str] = {}
+
         for table in top_tables:
             all_trs = table.find_all("tr")
             if not all_trs:
                 continue
 
-            # TR'leri gruplara ayır:
-            # Tek sütunlu → başlık / bölüm ayracı
-            # Çok sütunlu → data satırı
             current_title = ""
             current_data_trs: List[Tag] = []
 
@@ -659,14 +681,21 @@ class HTMLStructuredConverter:
                 ]
 
                 if len(cells) <= 1:
-                    # Tek sütun → muhtemelen başlık veya ayraç
+                    # ── Wrapper cell (nested table içerir) → atla ──
+                    # İç içe tablo TRleri zaten all_trs'te find_all ile bulunur
+                    cell = cells[0] if cells else None
+                    if cell and cell.find("table"):
+                        continue
+
                     text = non_empty_texts[0] if non_empty_texts else ""
                     if text and len(text) > 3:
                         # Önceki bölümü kaydet
                         if current_data_trs:
-                            section_text = self._process_mali_section(
-                                current_title, current_data_trs
+                            section_text, detected = self._process_mali_section(
+                                current_title, current_data_trs, shared_periods
                             )
+                            if detected:
+                                shared_periods = detected
                             if section_text:
                                 sections.append(section_text)
 
@@ -677,25 +706,34 @@ class HTMLStructuredConverter:
 
             # Son bölümü kaydet
             if current_data_trs:
-                section_text = self._process_mali_section(
-                    current_title, current_data_trs
+                section_text, detected = self._process_mali_section(
+                    current_title, current_data_trs, shared_periods
                 )
+                if detected:
+                    shared_periods = detected
                 if section_text:
                     sections.append(section_text)
 
         return sections
 
     def _process_mali_section(
-        self, title: str, data_trs: List[Tag]
-    ) -> str:
+        self, title: str, data_trs: List[Tag],
+        shared_periods: Optional[Dict[int, str]] = None
+    ) -> Tuple[str, Dict[int, str]]:
         """
         Mali veri bölümünü dönem-aware olarak doğal dil metnine dönüştürür.
 
         Dönem sütunlarını tespit eder ve her değeri dönemiyle birlikte yazar:
           "Toplam Aktifler: 2023/12 döneminde 1.234.567, 2024/06 döneminde 2.345.678"
+
+        Kendi dönem bilgisi yoksa shared_periods kullanır (önceki bölümlerden taşınan).
+
+        Returns:
+            (section_text, detected_periods)
+            detected_periods: Bu bölümde tespit edilen dönem eşlemesi (boş olabilir)
         """
         if not data_trs:
-            return ""
+            return "", {}
 
         # İlk çok-sütunlu satırı header olarak dene
         first_cells = data_trs[0].find_all(["td", "th"], recursive=False)
@@ -717,6 +755,13 @@ class HTMLStructuredConverter:
                 if re.search(r'dönem|period', h, re.IGNORECASE):
                     is_first_row_header = True
                     break
+
+        # Bu bölümde tespit edilen dönemler (dışarıya iletilecek)
+        detected_periods = period_cols.copy() if period_cols else {}
+
+        # Kendi dönem bilgisi yoksa shared context kullan
+        if not period_cols and shared_periods:
+            period_cols = shared_periods
 
         headers = first_texts if is_first_row_header else []
         data_start = 1 if is_first_row_header else 0
@@ -784,4 +829,4 @@ class HTMLStructuredConverter:
             elif label:
                 lines.append(label)
 
-        return "\n".join(lines)
+        return "\n".join(lines), detected_periods
