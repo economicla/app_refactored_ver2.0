@@ -84,7 +84,8 @@ class HTMLStructuredConverter:
         # Boş section'ları filtrele
         sections = [s for s in sections if s and s.strip()]
 
-        result = "\n\n---\n\n".join(sections)
+        # Bölümler zaten ## header ile ayrılıyor, --- ayracı chunk'ları bozuyor
+        result = "\n\n".join(sections)
         logger.info(f"✅ HTML conversion: {len(result)} chars, {len(sections)} sections")
         return result
 
