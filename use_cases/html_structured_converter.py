@@ -202,6 +202,9 @@ class HTMLStructuredConverter:
         Her satır bağımsız, kendi içinde tam bilgi içerir:
           "UMUMI: Risk 1.346.045.880 TRY, Mevcut Limit 2.025.000.000 TRY"
 
+        Dönem sütunları varsa (2023/12, 2024/6 gibi) değerlerle otomatik eşleştirir:
+          "Net Satışlar: 2024/6 döneminde 1.684.070.108, 2023/12 döneminde 1.142.758.961"
+
         Args:
             trs: <tr> Tag listesi
             section_title: Bölüm başlığı (opsiyonel)
@@ -233,6 +236,13 @@ class HTMLStructuredConverter:
                 pcn_indices.add(i)
 
         col_to_pcn = self._build_pcn_map(headers)
+
+        # ── Dönem sütunlarını tespit et ──
+        period_cols: Dict[int, str] = {}
+        for i, h in enumerate(headers):
+            period_match = re.search(r'(\d{4}[/\-]\d{1,2})', h)
+            if period_match:
+                period_cols[i] = period_match.group(1)
 
         # ── Data satırlarını işle (header'dan sonrası) ──
         for tr in trs[header_idx + 1:]:
@@ -271,7 +281,13 @@ class HTMLStructuredConverter:
                     if pcn_col < len(values):
                         pcn = values[pcn_col].strip()
 
-                if pcn:
+                # Dönem + PCN birlikte
+                if i in period_cols:
+                    if pcn:
+                        parts.append(f"{period_cols[i]} döneminde {value} {pcn}")
+                    else:
+                        parts.append(f"{period_cols[i]} döneminde {value}")
+                elif pcn:
                     parts.append(f"{header_name} {value} {pcn}")
                 else:
                     parts.append(f"{header_name}: {value}")
