@@ -707,6 +707,80 @@ async def ingest_document(
             except:
 
                 pass
+
+
+@router.post("/preview-html")
+async def preview_html_conversion(
+    file: UploadFile = File(...)
+):
+    """
+    HTML dokümanının dönüştürülmüş halini önizle (veritabanına KAYDETMEZ).
+    Converter'ın tablo yapılarını doğru parse edip etmediğini kontrol etmek için kullanılır.
+    """
+    temp_file_path = None
+    try:
+        if not file.filename.lower().endswith(('.html', '.htm')):
+            raise HTTPException(status_code=400, detail="Sadece HTML dosyaları desteklenir")
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
+            temp_file_path = tmp.name
+            content = await file.read()
+            with open(temp_file_path, 'wb') as f:
+                f.write(content)
+
+        # HTML'i oku
+        html_content = None
+        for enc in ('utf-8', 'windows-1254', 'latin-1', 'iso-8859-9'):
+            try:
+                with open(temp_file_path, 'r', encoding=enc) as f:
+                    html_content = f.read()
+                break
+            except UnicodeDecodeError:
+                continue
+        if html_content is None:
+            with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                html_content = f.read()
+
+        # Converter ile dönüştür
+        from app_refactored.use_cases.html_structured_converter import HTMLStructuredConverter
+        converter = HTMLStructuredConverter()
+        converted_text = converter.convert(html_content)
+
+        # Chunk'lara ayır (preview amaçlı)
+        from app_refactored.use_cases.intelligent_chunking import IntelligentChunker
+        chunker = IntelligentChunker(chunk_size=1000, chunk_overlap=200)
+        chunks = chunker.chunk(converted_text)
+
+        return {
+            "filename": file.filename,
+            "format_detected": converter._detect_format(
+                __import__('bs4', fromlist=['BeautifulSoup']).BeautifulSoup(html_content, "html.parser")
+            ),
+            "total_chars": len(converted_text),
+            "total_chunks": len(chunks),
+            "full_converted_text": converted_text,
+            "chunks_preview": [
+                {
+                    "chunk_index": i,
+                    "header": c.get("header"),
+                    "content_length": len(c["content"]),
+                    "content": c["content"]
+                }
+                for i, c in enumerate(chunks)
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ HTML preview failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except:
+                pass
+
  
 @router.post("/ingest-with-metadata")
 
