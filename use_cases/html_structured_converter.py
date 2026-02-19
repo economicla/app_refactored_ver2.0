@@ -348,10 +348,26 @@ class HTMLStructuredConverter:
     # FORMAT 1: TEKLİF  (<tbody id="..."> iç içe yapı)
     # ================================================================
 
+    def _find_inner_tables(self, section_tbody: Tag) -> List[Tag]:
+        """
+        Section tbody içindeki iç içe tabloları bul.
+        Sadece bu section'a ait tabloları döndürür (alt section'lardakileri değil).
+        """
+        tables = []
+        for table in section_tbody.find_all("table"):
+            if self._belongs_to_section(table, section_tbody):
+                # En dıştaki tabloyu al, iç içe tabloların child'larını değil
+                if not table.find_parent("table") or not self._belongs_to_section(
+                    table.find_parent("table"), section_tbody
+                ):
+                    tables.append(table)
+        return tables
+
     def _parse_teklif(self, soup: BeautifulSoup) -> List[str]:
         """
         Teklif HTML'ini bölüm bölüm parse eder.
         İç içe tbody yapısında her bölümün sadece kendi içeriğini alır.
+        İç içe table yapılarını tespit edip doğrudan inner table'ı parse eder.
         """
         sections: List[str] = []
 
@@ -360,17 +376,55 @@ class HTMLStructuredConverter:
             display_name = self.TEKLIF_SECTION_NAMES.get(section_id, section_id)
             section_lines: List[str] = [f"## {display_name}"]
 
-            # ── 1. Bu section'a ait TR'leri parse et ──
-            own_trs = [
-                tr for tr in tbody.find_all("tr")
-                if self._belongs_to_section(tr, tbody)
-            ]
+            # ── 1. İç içe tabloları bul ve parse et ──
+            inner_tables = self._find_inner_tables(tbody)
+            tables_parsed = False
 
-            if own_trs:
-                # Her zaman akıllı parse'a gönder — header satırını otomatik bulur
-                table_text = self._parse_trs_smart(own_trs)
-                if table_text:
-                    section_lines.append(table_text)
+            for table in inner_tables:
+                # Inner table'daki TR'leri al
+                inner_trs = table.find_all("tr")
+                if not inner_trs:
+                    continue
+
+                # İlk TR'nin hücre sayısını kontrol et
+                test_cells = inner_trs[0].find_all(["td", "th"], recursive=False)
+                if len(test_cells) >= 2:
+                    # Gerçek veri tablosu → akıllı parse
+                    table_text = self._parse_trs_smart(inner_trs)
+                    if table_text:
+                        section_lines.append(table_text)
+                        tables_parsed = True
+
+            # ── 2. Inner table bulunamadıysa, doğrudan TR'leri dene ──
+            if not tables_parsed:
+                own_trs = [
+                    tr for tr in tbody.find_all("tr", recursive=False)
+                    if self._belongs_to_section(tr, tbody)
+                ]
+                # Bir TR'nin içinde nested table var mı kontrol et
+                for tr in own_trs:
+                    nested_table = tr.find("table")
+                    if nested_table:
+                        nested_trs = nested_table.find_all("tr")
+                        if nested_trs:
+                            test_cells = nested_trs[0].find_all(["td", "th"], recursive=False)
+                            if len(test_cells) >= 2:
+                                table_text = self._parse_trs_smart(nested_trs)
+                                if table_text:
+                                    section_lines.append(table_text)
+                                    tables_parsed = True
+                                    break
+
+            # ── 3. Hâlâ tablo bulanamadıysa own_trs ile dene ──
+            if not tables_parsed:
+                own_trs = [
+                    tr for tr in tbody.find_all("tr")
+                    if self._belongs_to_section(tr, tbody)
+                ]
+                if own_trs:
+                    table_text = self._parse_trs_smart(own_trs)
+                    if table_text:
+                        section_lines.append(table_text)
 
             # ── 2. Bu section'a ait div'leri parse et ──
             own_divs = [
