@@ -431,8 +431,9 @@ class DocumentIngestionUseCase:
             logger.info("🧹 Preprocessing text...")
             preprocessor = DocumentPreprocessor()
             raw_type = Path(filename).suffix.lstrip('.')
-            #HTML zaten extract_html'de temizlendi, düz metin olarak işle
-            preprocess_type = "txt" if raw_type in ("html", "htm") else raw_type
+            # HTML zaten HTMLStructuredConverter ile markdown'a dönüştürüldü
+            # "md" olarak işle → to_markdown() tekrar çalışmaz, sadece clean_text() çalışır
+            preprocess_type = "md" if raw_type in ("html", "htm") else raw_type
             text = preprocessor.preprocess(
                 text,
                 file_type=preprocess_type
