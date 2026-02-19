@@ -94,9 +94,12 @@ class HTMLStructuredConverter:
     # ================================================================
 
     def _clean_soup(self, soup: BeautifulSoup) -> None:
-        """Script, style ve meta etiketlerini temizle."""
+        """Script, style ve meta etiketlerini temizle, <br> etiketlerini koru."""
         for tag in soup(["script", "style", "meta", "link"]):
             tag.decompose()
+        # <br> etiketlerini satır sonuna dönüştür (açıklama metinlerinde korunması için)
+        for br in soup.find_all("br"):
+            br.replace_with("\n")
 
     def _detect_format(self, soup: BeautifulSoup) -> str:
         """HTML formatını otomatik tespit et."""
@@ -676,10 +679,8 @@ class HTMLStructuredConverter:
 
             for tr in all_trs:
                 cells = tr.find_all(["td", "th"], recursive=False)
-                non_empty_texts = [
-                    c.get_text(strip=True) for c in cells
-                    if c.get_text(strip=True)
-                ]
+                cell_texts = [c.get_text().strip() for c in cells]
+                non_empty_texts = [t for t in cell_texts if t]
 
                 if len(cells) <= 1:
                     # ── Wrapper cell (nested table içerir) → atla ──
@@ -738,7 +739,7 @@ class HTMLStructuredConverter:
 
         # İlk çok-sütunlu satırı header olarak dene
         first_cells = data_trs[0].find_all(["td", "th"], recursive=False)
-        first_texts = [c.get_text(strip=True) for c in first_cells]
+        first_texts = [c.get_text().strip() for c in first_cells]
 
         # Dönem sütunlarını tespit et
         period_cols: Dict[int, str] = {}
@@ -764,6 +765,15 @@ class HTMLStructuredConverter:
         if not period_cols and shared_periods:
             period_cols = shared_periods
 
+        # Shared periods kullanılıyorsa, veri sütun sayısı uyumluluğunu doğrula
+        # Açıklama tabloları (2 sütunlu) dönem verileriyle (4+ sütunlu) uyuşmaz
+        if period_cols and not detected_periods and data_trs:
+            max_period_idx = max(period_cols.keys())
+            ref_idx = data_start if data_start < len(data_trs) else 0
+            ref_cells = data_trs[ref_idx].find_all(["td", "th"], recursive=False)
+            if len(ref_cells) <= max_period_idx:
+                period_cols = {}
+
         headers = first_texts if is_first_row_header else []
         data_start = 1 if is_first_row_header else 0
 
@@ -782,7 +792,7 @@ class HTMLStructuredConverter:
 
         for tr in data_trs[data_start:]:
             cells = tr.find_all(["td", "th"], recursive=False)
-            texts = [c.get_text(strip=True) for c in cells]
+            texts = [c.get_text().strip() for c in cells]
 
             if not texts or not any(t.strip() for t in texts):
                 continue
