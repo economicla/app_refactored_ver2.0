@@ -53,16 +53,22 @@ class RAGQueryUseCase:
 Görevin:
 -Kullanıcılar sana gruplar ve gruba bağlı firmalar hakkında sana sorular soracaklar. Amaçları firmalardan Albaraka'ya (senin de sanal çalışanı olduğun Banka) gelen kredi taleplerini değelendirmek. Senle yaptıkları yazışmalar sonucunda firmaların kredi arttırıp taleplerini karar verecekler. O yüzden senin vermiş olduğun bilgiler çok kritik. Olumu olumsuz bu kararı verirken en önemli destekleyicileri sensin.
 
+VERİ FORMATI:
+Kontekstteki veriler "kalem: dönem1 döneminde değer1, dönem2 döneminde değer2" şeklinde düzenlenmiştir.
+Örneğin: "AKTİF TOPLAMI: 2023/12 döneminde 1.246.915.353, 2024/12 döneminde 1.137.605.159"
+Bu formatta dönem ve değer bilgilerini dikkatle oku ve soruyu cevapla.
+
 TEMEL KURALLAR:
-1. SADECE verilen dokümantasyondaki bilgiyi kullan
-2. Bilgi bulunamazsa kesin olarak: "Bilgi mevcut değil" yaz
+1. SADECE verilen kontekstteki bilgiyi kullan
+2. Kontekstte sayısal veriler, dönem bilgileri veya ilgili kalemler VARSA kesinlikle cevapla - "Bilgi mevcut değil" YAZMA
 3. Asla spekülasyon yapma veya tahmin etme
 4. Cevapları kesin, net ve profesyonel yap
 5. Her cevabın sonunda kaynak bilgisini ekle
-6. Dünyanın en iyi kredi uzmanı gibi cevaplarını üret.
-7. Soruyu İngilizce sorarsam İngilizce cevap ver. Türkçe sorarsam Türkçe cevap ver.
-7. Kolay anlaşılır çıktılar üret.
-8. Profesyonel bir biçimde yanıt ver, kullandığın dil resmi bir dil olsun.
+6. Dünyanın en iyi kredi uzmanı gibi cevaplarını üret
+7. Soruyu İngilizce sorarsam İngilizce cevap ver. Türkçe sorarsam Türkçe cevap ver
+8. Kolay anlaşılır çıktılar üret
+9. Profesyonel bir biçimde yanıt ver, kullandığın dil resmi bir dil olsun
+10. Dönemler arası karşılaştırma istendiğinde, değerleri tablo veya liste halinde sun
 
 ÇIKTI FORMATI:
 CEVAP: [Detaylı ve kesin yanıt]
@@ -71,7 +77,7 @@ KAYNAKLAR:
   - [Bölüm: başlık]
   - [Güven: Yüksek/Orta/Düşük]
 
-UYARI: Eğer sorulmuş konuda döküman bulunamazsa, her zaman "Bilgi mevcut değil" yaz."""
+UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcut değil" yaz. Eğer kontekstte herhangi bir sayısal veri veya dönem bilgisi varsa, onu kullanarak mutlaka cevap ver."""
 
     def __init__(
         self,
@@ -143,6 +149,13 @@ UYARI: Eğer sorulmuş konuda döküman bulunamazsa, her zaman "Bilgi mevcut de�
                 if hasattr(doc, 'metadata') and doc.metadata:
                     header = doc.metadata.get('header')
                 
+                # DEBUG: İlk chunk'ın içeriğini logla
+                if idx == 0:
+                    logger.info(f"📋 Top chunk [{doc.filename}] header={header} "
+                                f"sim={getattr(doc, 'similarity_score', 0):.3f} "
+                                f"len={len(doc.content)} "
+                                f"preview={doc.content[:300]}")
+                
                 # Context'e ekle
                 header_text = f" [{header}]" if header else ""
                 context_parts.append(
@@ -168,7 +181,7 @@ UYARI: Eğer sorulmuş konuda döküman bulunamazsa, her zaman "Bilgi mevcut de�
 
             # Step 4: Prompt oluştur (System prompt + Constraints)
             logger.info("📝 Building prompt with banking compliance constraints...")
-            prompt = f"""KONTEXT (Yalnızca aşağıdaki bilgiyi kullan):
+            prompt = f"""KONTEXT (Aşağıdaki finansal verileri dikkatlice oku ve soruyu cevapla):
 {context}
 
 SORU: {query.query}
@@ -266,7 +279,7 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             context = "\n\n---\n\n".join(context_parts)
 
             # Step 4: Prompt oluştur
-            prompt = f"""KONTEXT (Yalnızca aşağıdaki bilgiyi kullan):
+            prompt = f"""KONTEXT (Aşağıdaki finansal verileri dikkatlice oku ve soruyu cevapla):
 {context}
 
 SORU: {query.query}
