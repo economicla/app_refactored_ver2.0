@@ -150,6 +150,50 @@ class HTMLStructuredConverter:
     # AKILLI TABLO PARSE (PCN-AWARE)
     # ================================================================
 
+    def _extract_row_values(self, tr: Tag) -> List[str]:
+        """
+        TR'den hücre değerlerini çıkar.
+
+        Standart <td>/<th> hücreleri varsa onları kullan.
+        Tek hücreli satırlarda inner <div>/<span> elementlerini sanal hücre olarak kullan.
+        Bu sayede CSS-tablo yapılarını (tek <td> + çok <div>) da parse edebiliriz.
+
+        Örnek:
+          <tr><td>                                     → 1 hücre
+            <div>Label</div><div>val1</div><div>val2</div>
+          </td></tr>
+          → Standart: ["Labelval1val2"]  (tek hücre, birleşik)
+          → Bu metod: ["Label", "val1", "val2"]  (sanal hücreler)
+        """
+        cells = tr.find_all(["td", "th"], recursive=False)
+        texts = [c.get_text(strip=True) for c in cells]
+
+        # 2+ gerçek hücre varsa → standart tablo, doğrudan dön
+        if len(texts) >= 2:
+            return texts
+
+        # Tek hücre varsa → inner elementlerden sanal hücre çıkar
+        if len(cells) == 1:
+            cell = cells[0]
+
+            # 1) Doğrudan child div/span elementlerini dene
+            inner = cell.find_all(["div", "span"], recursive=False)
+            if len(inner) >= 3:
+                inner_texts = [el.get_text(strip=True) for el in inner]
+                non_empty = [t for t in inner_texts if t.strip()]
+                if len(non_empty) >= 3:
+                    return inner_texts
+
+            # 2) Herhangi bir child Tag'i dene (p, a, label, b vs.)
+            children = [c for c in cell.children if isinstance(c, Tag)]
+            if len(children) >= 3:
+                child_texts = [c.get_text(strip=True) for c in children]
+                non_empty = [t for t in child_texts if t.strip()]
+                if len(non_empty) >= 3:
+                    return child_texts
+
+        return texts
+
     def _build_pcn_map(self, headers: List[str]) -> Dict[int, int]:
         """
         PCN sütunlarını tespit et ve her değer sütununu ilgili PCN sütunuyla eşleştir.
@@ -182,14 +226,14 @@ class HTMLStructuredConverter:
         TR listesinde gerçek header satırını bul.
         Tek hücreli title/colspan satırlarını (ör: "LİMİT BİLGİLERİ") atlar,
         3+ hücreli ilk satırı header olarak döndürür.
+        Div-tabloları da destekler (tek <td> + çok <div>).
 
         Returns:
             (header_index, header_texts) — bulunamazsa (-1, [])
         """
         for idx, tr in enumerate(trs):
-            cells = tr.find_all(["td", "th"], recursive=False)
-            texts = [c.get_text(strip=True) for c in cells]
-            # 3+ hücre olan ilk satır = header
+            texts = self._extract_row_values(tr)
+            # 3+ hücre (gerçek veya sanal) olan ilk satır = header
             if len(texts) >= 3:
                 return idx, texts
         return -1, []
@@ -246,8 +290,7 @@ class HTMLStructuredConverter:
 
         # ── Data satırlarını işle (header'dan sonrası) ──
         for tr in trs[header_idx + 1:]:
-            cells = tr.find_all(["td", "th"], recursive=False)
-            values = [c.get_text(strip=True) for c in cells]
+            values = self._extract_row_values(tr)
 
             if not values or not any(v.strip() for v in values):
                 continue
@@ -311,14 +354,14 @@ class HTMLStructuredConverter:
 
     def _parse_simple_trs(self, trs: List[Tag], section_title: str = "") -> str:
         """Tek/iki sütunlu basit tabloyu doğal dil metnine dönüştür.
-        3+ sütunlu satırlar için currency-aware eşleştirme yapar."""
+        3+ sütunlu satırlar için currency-aware eşleştirme yapar.
+        Div-tabloları da destekler (tek <td> + çok <div>)."""
         lines: List[str] = []
         if section_title:
             lines.append(f"## {section_title}")
 
         for tr in trs:
-            cells = tr.find_all(["td", "th"], recursive=False)
-            texts = [c.get_text(strip=True) for c in cells]
+            texts = self._extract_row_values(tr)
             texts = [t for t in texts if t]
 
             if not texts:
