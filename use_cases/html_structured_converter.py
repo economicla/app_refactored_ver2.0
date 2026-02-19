@@ -640,6 +640,7 @@ class HTMLStructuredConverter:
           - Wrapper TR'ler (tek <td> + nested table) otomatik atlanır
           - Dönem sütunları bölümler arası taşınır (shared period context)
           - Başlık bilgi tabloları (firma adı, para birimi vs.) ayrı yakalanır
+          - Her bölüme firma adı eklenir (chunk'larda bağlam korunması için)
         """
         sections: List[str] = []
 
@@ -648,8 +649,9 @@ class HTMLStructuredConverter:
             if not t.find_parent("table")
         ]
 
-        # ── Pre-pass: Başlık bilgi tablolarını yakala ──
-        # Sadece tek-hücreli satırlardan oluşan tablolar → doküman meta bilgisi
+        # ── Pre-pass: Firma adını tespit et ──
+        # Başlık tablolarından firma/grup adını çıkar
+        firm_name = ""
         for table in top_tables:
             trs = table.find_all("tr", recursive=False)
             if not trs:
@@ -665,6 +667,19 @@ class HTMLStructuredConverter:
                 ]
                 if texts and len(texts) >= 2:
                     sections.append("\n".join(texts))
+                    # Firma adını tespit et (ilk başlık tablosundaki 3. satır genelde firma/grup adı)
+                    if not firm_name:
+                        for t in texts:
+                            # "584316-BAHARIYE GRUBU 2025-6" veya "584325-AKTÜL + MKS 2025-6" formatı
+                            if re.search(r'\d{4,}-', t) and not t.startswith('1') and len(t) < 200:
+                                # Koddan sonraki firma adını al
+                                match = re.match(r'\d+-(.+?)(?:\s+\d{4}[-/]\d+.*)?$', t.strip())
+                                if match:
+                                    firm_name = match.group(1).strip()
+                                    break
+
+        if firm_name:
+            logger.info(f"🏢 Firma adı tespit edildi: {firm_name}")
 
         # ── Shared period context across tables/sections ──
         shared_periods: Dict[int, str] = {}
@@ -694,7 +709,7 @@ class HTMLStructuredConverter:
                         # Önceki bölümü kaydet
                         if current_data_trs:
                             section_text, detected = self._process_mali_section(
-                                current_title, current_data_trs, shared_periods
+                                current_title, current_data_trs, shared_periods, firm_name
                             )
                             if detected:
                                 shared_periods = detected
@@ -709,7 +724,7 @@ class HTMLStructuredConverter:
             # Son bölümü kaydet
             if current_data_trs:
                 section_text, detected = self._process_mali_section(
-                    current_title, current_data_trs, shared_periods
+                    current_title, current_data_trs, shared_periods, firm_name
                 )
                 if detected:
                     shared_periods = detected
@@ -720,7 +735,8 @@ class HTMLStructuredConverter:
 
     def _process_mali_section(
         self, title: str, data_trs: List[Tag],
-        shared_periods: Optional[Dict[int, str]] = None
+        shared_periods: Optional[Dict[int, str]] = None,
+        firm_name: str = ""
     ) -> Tuple[str, Dict[int, str]]:
         """
         Mali veri bölümünü dönem-aware olarak doğal dil metnine dönüştürür.
@@ -769,8 +785,8 @@ class HTMLStructuredConverter:
         # Açıklama tabloları (2 sütunlu) dönem verileriyle (4+ sütunlu) uyuşmaz
         if period_cols and not detected_periods and data_trs:
             max_period_idx = max(period_cols.keys())
-            ref_idx = data_start if data_start < len(data_trs) else 0
-            ref_cells = data_trs[ref_idx].find_all(["td", "th"], recursive=False)
+            # İlk veri satırının sütun sayısını kontrol et
+            ref_cells = data_trs[0].find_all(["td", "th"], recursive=False)
             if len(ref_cells) <= max_period_idx:
                 period_cols = {}
 
@@ -789,6 +805,8 @@ class HTMLStructuredConverter:
         lines: List[str] = []
         if title:
             lines.append(f"## {title}")
+            if firm_name:
+                lines.append(f"Firma/Grup: {firm_name}")
 
         for tr in data_trs[data_start:]:
             cells = tr.find_all(["td", "th"], recursive=False)
