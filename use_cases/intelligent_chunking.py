@@ -2,13 +2,13 @@
 
 Intelligent Text Chunking
 
-RecursiveCharacterTextSplitter + Markdown headers
+RecursiveCharacterTextSplitter + Markdown headers  (hierarchy-aware)
 
 """
  
 import logging
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Dict
 
 import re
  
@@ -21,7 +21,9 @@ class IntelligentChunker:
 
     Anlamsal bütünlüğü koruyan chunker
 
-    Markdown başlıkları ve paragraflon temel alır
+    Markdown başlık hiyerarşisini korur:
+      ## Ana Bölüm  →  ### Alt Bölüm  hiyerarşisinde
+      alt bölüm chunk'ları "Ana Bölüm > Alt Bölüm" header bilgisi taşır.
 
     """
 
@@ -31,13 +33,13 @@ class IntelligentChunker:
 
         self.chunk_overlap = chunk_overlap
 
-    def find_sections(self, text: str) -> List[Tuple[str, int, int]]:
+    def find_sections(self, text: str) -> List[Tuple[str, int, int, int]]:
 
         """
 
         Markdown başlıklarını bul
 
-        Returns: [(header, start_pos, end_pos), ...]
+        Returns: [(title, level, start_pos, end_pos), ...]
 
         """
 
@@ -49,7 +51,7 @@ class IntelligentChunker:
 
             level = len(match.group(1))
 
-            title = match.group(2)
+            title = match.group(2).strip()
 
             sections.append((title, level, match.start(), match.end()))
 
@@ -59,7 +61,8 @@ class IntelligentChunker:
 
         """
 
-        Markdown başlıklarına göre parçala
+        Markdown başlıklarına göre hiyerarşik parçala.
+        Üst başlık (##) bilgisi alt başlık (###) chunk'larına taşınır.
 
         """
 
@@ -71,6 +74,8 @@ class IntelligentChunker:
 
             return self._chunk_by_paragraphs(text)
 
+        # ── Üst başlık hiyerarşisi: her seviye için en son görülen başlık ──
+        parent_headers: Dict[int, str] = {}  # level → title
         chunks = []
 
         for i, (title, level, start, end) in enumerate(sections):
@@ -81,13 +86,28 @@ class IntelligentChunker:
 
             section_text = text[start:next_start].strip()
 
+            # Hiyerarşiyi güncelle
+            parent_headers[level] = title
+            # Bu seviyeden düşük seviyeleri temizle (yeni üst bölüme geçildi)
+            for lv in list(parent_headers.keys()):
+                if lv > level:
+                    del parent_headers[lv]
+
+            # Birleşik header oluştur (## Ana > ### Alt)
+            composite_parts = []
+            for lv in sorted(parent_headers.keys()):
+                if lv < level:
+                    composite_parts.append(parent_headers[lv])
+            composite_parts.append(title)
+            composite_header = " > ".join(composite_parts) if len(composite_parts) > 1 else title
+
             if section_text:
 
                 chunks.append({
 
                     'content': section_text,
 
-                    'header': title,
+                    'header': composite_header,
 
                     'level': level,
 
@@ -97,7 +117,7 @@ class IntelligentChunker:
 
         return chunks
 
-    def _chunk_by_paragraphs(self, text: str) -> List[dict]:
+    def _chunk_by_paragraphs(self, text: str, header: Optional[str] = None) -> List[dict]:
 
         """
 
@@ -129,7 +149,7 @@ class IntelligentChunker:
 
                         'content': current_chunk.strip(),
 
-                        'header': None,
+                        'header': header,
 
                         'level': 0,
 
@@ -145,7 +165,7 @@ class IntelligentChunker:
 
                 'content': current_chunk.strip(),
 
-                'header': None,
+                'header': header,
 
                 'level': 0,
 
@@ -175,7 +195,7 @@ class IntelligentChunker:
                 continue
             if len(content) > self.chunk_size * 1.2:
                 #Büyük chunk'ı tekrar böl
-                sub_chunks = self._chunk_by_paragraphs(content)
+                sub_chunks = self._chunk_by_paragraphs(content, header=c['header'])
                 for sub in sub_chunks:
                     #Header bilgisini koru
                     sub['header'] = c['header']
