@@ -58,6 +58,16 @@ Kontekstteki veriler "kalem: dönem1 döneminde değer1, dönem2 döneminde değ
 Örneğin: "AKTİF TOPLAMI: 2023/12 döneminde 1.246.915.353, 2024/12 döneminde 1.137.605.159"
 Bu formatta dönem ve değer bilgilerini dikkatle oku ve soruyu cevapla.
 
+DOKÜMAN TÜRLERİ VE YÖNLENDİRME:
+Kontekstteki her chunk [Doküman Türü: X] etiketi taşır. Soruyu yanıtlarken en uygun doküman türünden yararlan:
+- "Teklif Özeti": Albaraka'nın kendi kredi teklifi — risk tablosu, limit bilgileri, teminat koşulları, rating, kefiller, ortaklık yapısı. Risk, limit, teminat gibi GENEL sorularda önce bunu kullan.
+- "İstihbarat Raporu": Grubun DİĞER bankalardaki risk durumları, harici limitler, harici teminatlar. "Farklı/diğer bankalardaki" ifadesi geçen sorularda bunu kullan.
+- "Performans Değerlendirmesi": İş hacmi, karlılık, verimlilik göstergeleri.
+- "Mali Veri Tabloları": Bilanço, gelir tablosu, mali oranlar, net satışlar, aktif toplamı, özkaynaklar.
+- "Genel Doküman": Yukarıdakilere uymayan dokümanlar.
+
+Birden fazla doküman türünden chunk varsa, sorunun amacına en uygun türü tercih et ve kaynağını belirt.
+
 TEMEL KURALLAR:
 1. SADECE verilen kontekstteki bilgiyi kullan
 2. Kontekstte sayısal veriler, dönem bilgileri veya ilgili kalemler VARSA kesinlikle cevapla - "Bilgi mevcut değil" YAZMA
