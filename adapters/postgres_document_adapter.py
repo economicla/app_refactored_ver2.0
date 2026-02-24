@@ -400,6 +400,9 @@ class PostgresDocumentAdapter(IDocumentRepository):
                 query = (
                     select(DocumentModel, distance.label('distance'))
                     .where(DocumentModel.deleted_at.is_(None))
+                    .where(
+                        text("(doc_metadata->>'is_dictionary') IS DISTINCT FROM 'true'")
+                    )
                     .order_by(distance)
                     .limit(top_k)
                 )
@@ -445,7 +448,13 @@ class PostgresDocumentAdapter(IDocumentRepository):
             try:
                 distance = DocumentModel.embedding.cosine_distance(embedding)
 
-                query = select(DocumentModel, distance.label('distance')).where(DocumentModel.deleted_at.is_(None))
+                query = (
+                    select(DocumentModel, distance.label('distance'))
+                    .where(DocumentModel.deleted_at.is_(None))
+                    .where(
+                        text("(doc_metadata->>'is_dictionary') IS DISTINCT FROM 'true'")
+                    )
+                )
 
                 #Eğer document_id varsa, sadece o dokümandan ara
                 if document_id:
