@@ -484,6 +484,55 @@ class PostgresDocumentAdapter(IDocumentRepository):
                 logger.error(f"❌ Filtered search failed: {str(e)}")
                 raise
             
+    async def search_dictionary(
+        self,
+        embedding: List[float],
+        top_k: int = 5
+    ) -> SearchResult:
+        """
+        Sadece veri sözlüğü (is_dictionary=true) chunk'larını ara.
+        Sözlük dokümanı yoksa boş SearchResult döndür.
+        """
+        async with await self._get_session() as session:
+            try:
+                distance = DocumentModel.embedding.cosine_distance(embedding)
+
+                query = (
+                    select(DocumentModel, distance.label('distance'))
+                    .where(DocumentModel.deleted_at.is_(None))
+                    .where(
+                        text("doc_metadata->>'is_dictionary' = 'true'")
+                    )
+                    .order_by(distance)
+                    .limit(top_k)
+                )
+
+                result = await session.execute(query)
+                rows = result.fetchall()
+
+                documents = []
+                for db_doc, distance_val in rows:
+                    similarity_score = 1.0 - distance_val
+                    doc = DocumentChunk(
+                        id=db_doc.id,
+                        filename=db_doc.filename,
+                        chunk_index=db_doc.chunk_index,
+                        content=db_doc.content,
+                        embedding=db_doc.embedding,
+                        similarity_score=float(similarity_score),
+                        metadata=db_doc.doc_metadata or {},
+                        created_at=db_doc.created_at
+                    )
+                    documents.append(doc)
+
+                if documents:
+                    logger.info(f"📖 Dictionary search: {len(documents)} sözlük chunk'ı bulundu")
+                return SearchResult(documents=documents, search_time_ms=0.0)
+
+            except Exception as e:
+                logger.debug(f"📖 Dictionary search not available: {e}")
+                return SearchResult(documents=[], search_time_ms=0.0)
+
     async def get_by_filename(self, filename: str) -> List[DocumentChunk]:
         """Dosya adına göre tüm chunk'ları getir"""
         async with await self._get_session() as session:
