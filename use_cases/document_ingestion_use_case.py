@@ -40,7 +40,13 @@ logger = logging.getLogger(__name__)
  
 class DocumentIngestionUseCase:
 
-    """Doküman yükleme use case - Dependency Injection ile"""
+   """Doküman yükleme use case - Dependency Injection ile"""
+  # HTML format -> doküman türü eşleşmesi
+    DOC_TYPE_MAP = {
+        "teklif": "Teklif Özeti",
+        "performans": "Performans Değerlendirmesi",
+        "mali_veri": "Mali Veri Tabloları",
+    }
  
     def __init__(
 
