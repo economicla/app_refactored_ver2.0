@@ -40,8 +40,9 @@ logger = logging.getLogger(__name__)
  
 class DocumentIngestionUseCase:
 
-   """Doküman yükleme use case - Dependency Injection ile"""
-  # HTML format -> doküman türü eşleşmesi
+    """Doküman yükleme use case - Dependency Injection ile"""
+
+    # HTML format → doküman türü eşlemesi
     DOC_TYPE_MAP = {
         "teklif": "Teklif Özeti",
         "performans": "Performans Değerlendirmesi",
@@ -363,7 +364,9 @@ class DocumentIngestionUseCase:
 
             result = converter.convert(html_content)
 
-            logger.info(f"✅ HTML extraction: {len(result)} chars")
+            self._detected_html_format = getattr(converter, 'detected_format', None)
+
+            logger.info(f"✅ HTML extraction: {len(result)} chars (format={self._detected_html_format})")
 
             return result
 
@@ -372,6 +375,42 @@ class DocumentIngestionUseCase:
             logger.error(f"❌ HTML extraction failed: {str(e)}")
 
             raise
+
+    def _detect_document_type(self, filename: str, text: str = "") -> str:
+        """Doküman türünü tespit et (chunk etiketleme için).
+        
+        HTML: HTMLStructuredConverter formatına göre
+        Diğer: dosya adı + içerik analizi
+        """
+        file_ext = Path(filename).suffix.lower()
+
+        # HTML → converter'ın tespit ettiği formatı kullan
+        if file_ext in ('.html', '.htm'):
+            html_fmt = getattr(self, '_detected_html_format', None)
+            if html_fmt and html_fmt in self.DOC_TYPE_MAP:
+                return self.DOC_TYPE_MAP[html_fmt]
+
+        # Dosya adı anahtar kelime tespiti
+        fname_lower = filename.lower()
+        if "istihbarat" in fname_lower:
+            return "İstihbarat Raporu"
+        if "teklif" in fname_lower:
+            return "Teklif Özeti"
+        if "performans" in fname_lower:
+            return "Performans Değerlendirmesi"
+        if any(kw in fname_lower for kw in ("mali", "solo", "konsolide", "bilanco", "bilanço")):
+            return "Mali Veri Tabloları"
+
+        # İçerik analizi (ilk 5000 karakter)
+        sample = (text[:5000] if text else "").lower()
+        if any(kw in sample for kw in ("istihbarat", "diğer bankalardaki", "bankacılık riskleri")):
+            return "İstihbarat Raporu"
+        if any(kw in sample for kw in ("limit bilgileri", "teminat koşulları", "rating değerleri")):
+            return "Teklif Özeti"
+        if any(kw in sample for kw in ("net satışlar", "aktif toplam", "özkaynak")):
+            return "Mali Veri Tabloları"
+
+        return "Genel Doküman"
  
     
     def _chunk_text(self, text: str) -> List[str]:
@@ -454,7 +493,9 @@ class DocumentIngestionUseCase:
             chunks = [c['content'] for c in chunk_objects]
             #Kaynak prefix ekle
             doc_label = filename.rsplit(".", 1)[0].replace("-", " ").replace("_", " ").title()
-            chunks = [f"[Kaynak: {doc_label}]\n\n{c}" for c in chunks]
+            doc_type = self._detect_document_type(filename, text)
+            logger.info(f"📑 Doküman türü tespit edildi: {doc_type}")
+            chunks = [f"[Kaynak: {doc_label} | Doküman Türü: {doc_type}]\n\n{c}" for c in chunks]
  
             # Step 3: Embedding'ler oluştur
 
@@ -494,7 +535,9 @@ class DocumentIngestionUseCase:
 
                         "source": filename,
 
-                        "chunk_position": chunk_objects[idx].get('position')
+                        "chunk_position": chunk_objects[idx].get('position'),
+
+                        "doc_type": doc_type
 
                     }
 
