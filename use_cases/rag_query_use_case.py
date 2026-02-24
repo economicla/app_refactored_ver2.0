@@ -118,25 +118,30 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
     QUERY_INTENT_RULES: List[Tuple[List[str], str, float]] = [
         # Diğer bankalar → İstihbarat Raporu
         (["diğer banka", "farklı banka", "harici risk", "harici limit",
-          "bankacılık risk", "sektör riski", "istihbarat", "diğer bankalardaki"],
-         "İstihbarat Raporu", 0.25),
+          "bankacılık risk", "sektör riski", "istihbarat", "diğer bankalardaki",
+          "dış risk", "harici teminat", "diğer bankalar"],
+         "İstihbarat Raporu", 0.30),
 
-        # Genel risk, limit, teminat → Teklif Özeti
-        (["genel risk", "toplam risk", "grubun riski", "risk tablosu",
-          "limit bilgi", "teminat koşul", "rating", "kefil", "ortaklık yapı",
+        # Genel risk, limit, teminat → Teklif Özeti (öncelikli, genel risk sorguları)
+        (["genel risk", "toplam risk", "grubun riski", "grubun risk",
+          "risk tablosu", "risk nedir", "riski nedir", "risk durumu",
+          "mevcut risk", "güncel risk", "risk yapısı", "kredi riski",
+          "limit bilgi", "limit nedir", "teminat koşul", "teminat nedir",
+          "rating", "kefil", "ortaklık yapı",
           "teklif", "komite", "şube teklif", "kredi müdürlüğü"],
-         "Teklif Özeti", 0.25),
+         "Teklif Özeti", 0.35),
 
         # Mali veriler → Mali Veri Tabloları
         (["net satış", "aktif toplam", "özkaynak", "bilanço", "bilançe",
           "gelir tablosu", "mali oran", "kısa vadeli", "uzun vadeli",
           "dönen varlık", "duran varlık", "brüt kar", "faaliyet karı",
-          "esas faaliyet", "amortisman", "finansman gideri"],
-         "Mali Veri Tabloları", 0.20),
+          "esas faaliyet", "amortisman", "finansman gideri",
+          "mali veri", "finansal tablo"],
+         "Mali Veri Tabloları", 0.25),
 
         # Performans → Performans Değerlendirmesi
         (["performans", "iş hacmi", "karlılık", "verimlilik", "büyüme oranı"],
-         "Performans Değerlendirmesi", 0.20),
+         "Performans Değerlendirmesi", 0.25),
     ]
 
     def _detect_query_intent(self, query: str) -> Optional[str]:
@@ -159,6 +164,27 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 return boost
         return 0.0
 
+    # Rekabet eden doküman türleri — tercih edilen tür seçildiğinde,
+    # rakip türlere negatif boost (ceza) uygulanır
+    COMPETING_TYPES: Dict[str, List[str]] = {
+        "Teklif Özeti": ["İstihbarat Raporu"],
+        "İstihbarat Raporu": ["Teklif Özeti"],
+    }
+
+    @staticmethod
+    def _detect_type_from_filename(filename: str) -> str:
+        """Dosya adından doküman türünü tespit et (son fallback)."""
+        fname = filename.lower()
+        if "istihbarat" in fname:
+            return "İstihbarat Raporu"
+        if "teklif" in fname:
+            return "Teklif Özeti"
+        if any(kw in fname for kw in ("performans", "değerlendirme")):
+            return "Performans Değerlendirmesi"
+        if any(kw in fname for kw in ("mali", "solo", "konsolide", "bilanco", "bilanço")):
+            return "Mali Veri Tabloları"
+        return ""
+
     def _rerank_chunks(self, documents: list, query: str, final_k: int) -> list:
         """
         Sorgu niyetine göre chunk'ları yeniden sırala.
@@ -166,8 +192,9 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         Strateji:
         1. Sorgu niyetini tespit et (hangi doküman türü tercih edilmeli)
         2. Tercih edilen türdeki chunk'ların skorunu boost et
-        3. Çeşitlilik sağla: her doküman türünden en az 1 chunk al
-        4. Final top_k kadar döndür
+        3. Rakip doküman türüne ceza (penalty) uygula
+        4. Çeşitlilik: tercih edilen türden %75, diğerlerinden %25
+        5. Final top_k kadar döndür
         """
         if not documents:
             return documents
@@ -180,8 +207,10 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             return documents[:final_k]
 
         boost = self._get_boost_for_type(preferred_type)
+        competing_types = self.COMPETING_TYPES.get(preferred_type, [])
+        penalty = boost * 0.5  # Rakip tür cezası (boost'un yarısı)
 
-        # Her chunk'ın doküman türünü metadata veya content'ten belirle
+        # Her chunk'ın doküman türünü metadata, content veya filename'den belirle
         scored_docs = []
         for doc in documents:
             sim = getattr(doc, 'similarity_score', 0)
@@ -197,19 +226,28 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 if m:
                     doc_type = m.group(1).strip()
 
-            # Boost uygula
-            boosted_sim = sim + boost if doc_type == preferred_type else sim
+            # 3. Dosya adından (son fallback)
+            if not doc_type and doc.filename:
+                doc_type = self._detect_type_from_filename(doc.filename)
+
+            # Boost / Penalty uygula
+            if doc_type == preferred_type:
+                boosted_sim = sim + boost
+            elif doc_type in competing_types:
+                boosted_sim = sim - penalty
+            else:
+                boosted_sim = sim
+
             scored_docs.append((boosted_sim, doc_type, doc))
 
         # Boost'lu skora göre sırala
         scored_docs.sort(key=lambda x: x[0], reverse=True)
 
-        # Çeşitlilik: tercih edilen türden en az yarısı, diğerlerinden de temsil
+        # Çeşitlilik: tercih edilen türden %75, diğerlerinden %25
         preferred_chunks = [x for x in scored_docs if x[1] == preferred_type]
         other_chunks = [x for x in scored_docs if x[1] != preferred_type]
 
-        # Tercih edilen türden en fazla ceil(final_k * 0.6), kalanı diğerlerinden
-        max_preferred = max(1, int(final_k * 0.6))
+        max_preferred = max(1, int(final_k * 0.75))
         result = preferred_chunks[:max_preferred]
         remaining = final_k - len(result)
         result.extend(other_chunks[:remaining])
@@ -228,7 +266,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         for _, dt, _ in result[:final_k]:
             type_counts[dt] = type_counts.get(dt, 0) + 1
         logger.info(f"🔀 Re-ranking: preferred={preferred_type}, boost={boost}, "
-                     f"distribution={type_counts}")
+                     f"penalty={penalty}, distribution={type_counts}")
 
         return final_docs
 
@@ -254,7 +292,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 raise Exception("Embedding oluşturulamadı")
 
             # Step 2: Benzer dokümantasyonu ara (geniş aday havuzu)
-            candidate_k = query.top_k * 4  # 4x fazla aday çek
+            candidate_k = query.top_k * 6  # 6x fazla aday çek (daha geniş aday havuzu)
             logger.info(f"🔎 Searching similar documents (candidate_k={candidate_k}, final_k={query.top_k})...")
             search_result = await self.document_repository.search_similar(
                 embedding=query_embedding,
@@ -373,7 +411,7 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                 raise Exception("Embedding oluşturulamadı")
 
             # Step 2: Benzer dokümantasyonu ara (geniş aday havuzu)
-            candidate_k = query.top_k * 4
+            candidate_k = query.top_k * 6
             logger.info(f"🔎 Searching similar documents (candidate_k={candidate_k}, final_k={query.top_k})...")
             search_result = await self.document_repository.search_similar(
                 embedding=query_embedding,
