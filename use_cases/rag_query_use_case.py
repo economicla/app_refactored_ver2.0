@@ -172,148 +172,173 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
     }
 
     # ================================================================
-    # QUERY ENHANCEMENT — Sorgu Genişletme ve Bölüm Hedefleme
+    # GENEL İÇERİK ANALİZİ — Otomatik, kural gerektirmeyen sinyaller
     # ================================================================
-    # Sorgu anahtar kelimeleri → hedef bölüm başlıkları + genişletme terimleri
-    # Tuple: (keywords, target_section_headers, expansion_terms, section_boost)
-    QUERY_SECTION_RULES: List[Tuple[List[str], List[str], List[str], float]] = [
-        # Risk/limit sorguları → Limit Bilgileri / Risk Tablosu
-        (["genel risk", "toplam risk", "grubun riski", "grubun risk",
-          "risk tablosu", "risk nedir", "riski nedir", "risk durumu",
-          "mevcut risk", "güncel risk", "nakdi risk", "gayrinakdi risk",
-          "limit bilgi", "limit nedir", "toplam limit", "kredi riski"],
-         ["LİMİT BİLGİLERİ", "GRUP RİSK TABLOSU", "RİSK TABLOSU", "LIMIT"],
-         ["limit bilgileri", "nakdi risk", "gayrinakdi risk", "toplam limit",
-          "mevcut limit", "risk tablosu", "umumi", "firma risk", "grup risk"],
-         0.25),
 
-        # Teminat → Teminat Koşulları
-        (["teminat koşul", "teminat nedir", "teminat bilgi", "ipotek", "rehin",
-          "teminat durumu", "teminat yapısı"],
-         ["TEMİNAT KOŞULLARI", "TEMİNAT"],
-         ["teminat koşulları", "ipotek", "rehin", "teminat tutarı", "teminat oranı"],
-         0.25),
-
-        # Rating → Rating Değerleri
-        (["rating", "kredi notu", "derecelendirme", "nota sahip"],
-         ["RATING DEĞERLERİ", "RATING"],
-         ["rating değeri", "kredi notu", "derecelendirme", "rating skoru"],
-         0.25),
-
-        # Kefiller → Kefiller bölümü
-        (["kefil", "kefalet", "müşterek borçlu", "kefaleti"],
-         ["KEFİLLER", "KEFALET"],
-         ["kefil bilgileri", "kefalet", "müşterek borçlu", "müteselsil kefil"],
-         0.25),
-
-        # Ortaklık yapısı → Genel Değerlendirme
-        (["ortaklık", "ortak yapı", "hisse", "pay oranı", "şirket yapısı"],
-         ["GENEL DEĞERLENDİRME VE ORTAKLIK YAPISI", "ORTAKLIK"],
-         ["ortaklık yapısı", "hisse oranı", "pay sahipleri", "ortak bilgileri"],
-         0.25),
-
-        # Karlılık / Performans oranları
-        (["karlılık", "kar marjı", "brüt kar", "net kar", "favök",
-          "ROA", "ROE", "kârlılık"],
-         ["Karlılık Oranları", "Profitability Ratios", "KARLILIK"],
-         ["brüt kar marjı", "net kar marjı", "ROA", "ROE", "FAVÖK marjı"],
-         0.25),
-
-        # Bilanço verileri
-        (["aktif toplam", "özkaynak", "bilanço", "borç yapı",
-          "yabancı kaynak", "kısa vadeli", "uzun vadeli"],
-         ["Bilanço", "BALANCE SHEET", "BİLANÇO", "AKTİF"],
-         ["aktif toplamı", "özkaynak", "kısa vadeli borç", "uzun vadeli borç",
-          "dönen varlık", "duran varlık", "yabancı kaynak"],
-         0.25),
-
-        # Gelir tablosu
-        (["net satış", "gelir tablosu", "faaliyet karı", "esas faaliyet",
-          "amortisman", "finansman gideri", "satış geliri"],
-         ["Gelir Tablosu", "INCOME STATEMENT", "GELİR TABLOSU"],
-         ["net satışlar", "faaliyet karı", "esas faaliyet geliri", "amortisman",
-          "finansman gideri", "brüt kar"],
-         0.25),
-
-        # Şube teklifi / komite görüşü
-        (["şube teklif", "komite görüş", "kredi müdürlüğü", "müdürlük görüş"],
-         ["ŞUBE TEKLİFİ VE KREDİ MÜDÜRLÜĞÜ GÖRÜŞÜ", "ŞUBE TEKLİFİ", "KOMİTE"],
-         ["şube teklifi", "kredi müdürlüğü görüşü", "komite kararı"],
-         0.25),
-    ]
-
-    def _detect_target_sections(self, query: str) -> Tuple[List[str], List[str], float]:
+    @staticmethod
+    def _query_wants_numbers(query_lower: str) -> bool:
         """
-        Sorgudan hedef bölüm başlıklarını ve genişletme terimlerini tespit et.
-        
-        Returns:
-            (target_headers, expansion_terms, section_boost)
+        Sorgunun sayısal/tablo veri isteyip istemediğini otomatik tespit eder.
+        Hardcoded bölüm kuralı gerektirmez — sorgu dilinden çıkarım yapar.
         """
-        q_lower = query.lower()
-        all_headers: List[str] = []
-        all_terms: List[str] = []
-        max_boost = 0.0
+        indicators = [
+            "kaç", "ne kadar", "tutarı", "toplam", "miktarı", "değeri",
+            "oranı", "yüzdesi", "%", "rakam", "sayısal",
+            "nedir", "ne dir",
+            "risk", "limit", "teminat", "kredi", "borç",
+            "aktif", "pasif", "özkaynak", "satış", "kar", "zarar",
+            "bilanço", "gelir tablosu", "mevcut", "güncel",
+        ]
+        return any(ind in query_lower for ind in indicators)
 
-        for keywords, headers, terms, boost in self.QUERY_SECTION_RULES:
-            for kw in keywords:
-                if kw in q_lower:
-                    all_headers.extend(headers)
-                    all_terms.extend(terms)
-                    max_boost = max(max_boost, boost)
-                    logger.info(f"🎯 Bölüm hedefi tespit: '{kw}' → {headers[0]}")
-                    break  # Bu kural eşleşti, sonraki kurala geç
-
-        return (list(set(all_headers)), list(set(all_terms)), max_boost)
-
-    def _enhance_query(self, query: str) -> str:
+    @staticmethod
+    def _calc_numericity(content: str) -> float:
         """
-        Sorguyu hedef bölüm terimleriyle genişlet.
-        Embedding aramasının doğru bölümleri yakalamasını sağlar.
-        
-        Örnek:
-          'grubun genel riski nedir?' →
-          'grubun genel riski nedir? (limit bilgileri, nakdi risk, gayrinakdi risk, ...)
+        İçerikteki sayısal yoğunluğu hesapla (0.0 - 1.0).
+        Sayısal veri ağırlıklı chunk'lar daha yüksek skor alır.
         """
-        _, expansion_terms, _ = self._detect_target_sections(query)
-        if not expansion_terms:
-            return query
+        if not content:
+            return 0.0
+        numbers = re.findall(r'\d[\d.,]+', content)
+        total_chars = len(content)
+        num_chars = sum(len(n) for n in numbers)
+        return min(1.0, (num_chars / total_chars) * 10)
 
-        # Orijinal sorgu + genişletme terimleri (parantez içinde, embedding'i yönlendirir)
-        enhanced = f"{query} ({', '.join(expansion_terms)})"
-        logger.info(f"📝 Sorgu genişletildi: '{query}' → '{enhanced}'")
-        return enhanced
+    @staticmethod
+    def _has_tabular_data(content: str) -> bool:
+        """
+        İçerikte tablo/yapısal veri var mı?
+        Para birimleri, büyük sayılar, key:value çiftleri.
+        """
+        currency_data = re.findall(r'\d[\d.,]+\s*(TRY|USD|EUR|TL)', content)
+        big_numbers = re.findall(r'\d{1,3}(?:[.,]\d{3})+', content)
+        kv_pairs = re.findall(r'\w+\s*:\s*\d', content)
+        return len(currency_data) >= 2 or len(big_numbers) >= 3 or len(kv_pairs) >= 3
 
     def _get_chunk_header(self, doc) -> str:
-        """
-        Chunk'ın bölüm başlığını metadata veya content'ten çıkar.
-        """
+        """Chunk'ın bölüm başlığını metadata veya content'ten çıkar."""
         header = ""
-        # 1. Metadata'dan
         if hasattr(doc, 'metadata') and doc.metadata:
             header = doc.metadata.get('header', '')
-        
-        # 2. Content'ten markdown header (## veya ### ile başlayan ilk satır)
         if not header and doc.content:
             m = re.match(r'^#{1,4}\s+(.+)', doc.content.strip())
             if m:
                 header = m.group(1).strip()
-        
         return header
 
-    def _calc_section_boost(self, chunk_header: str, target_headers: List[str],
-                            section_boost: float) -> float:
+    def _score_chunk_relevance(self, doc, query: str) -> float:
         """
-        Chunk'ın başlığı hedef bölümlerden biriyle eşleşiyorsa boost döndür.
-        Kısmi eşleşme de kabul edilir (alt bölüm hiyerarşisi için).
+        Genel içerik uygunluk skoru — hardcoded kural kullanmaz.
+
+        3 otomatik sinyal:
+        1. Sayısallık: Sorgu sayı istiyorsa, sayısal chunk'lar tercih edilir
+        2. Tablo verisi: Yapısal veri içeren chunk'lara ek puan
+        3. Sorgu-içerik kelime örtüşmesi: Sorgu kelimeleri içerikte geçiyorsa ek puan
+
+        Toplam max boost: ~0.35
+        """
+        score = 0.0
+        content = doc.content
+        q_lower = query.lower()
+
+        # 1. Sayısallık sinyali
+        wants_nums = self._query_wants_numbers(q_lower)
+        if wants_nums:
+            num_density = self._calc_numericity(content)
+            score += num_density * 0.15  # max +0.15
+
+        # 2. Tablo verisi sinyali
+        if wants_nums and self._has_tabular_data(content):
+            score += 0.10  # +0.10
+
+        # 3. Kelime örtüşmesi
+        query_tokens = set(re.findall(r'[a-züöçşığA-ZÜÖÇŞİĞ]{3,}', q_lower))
+        if query_tokens:
+            content_lower = content.lower()
+            overlap = sum(1 for t in query_tokens if t in content_lower)
+            score += (overlap / len(query_tokens)) * 0.10  # max +0.10
+
+        return score
+
+    # ================================================================
+    # SÖZLÜK DESTEKLİ SORGU GENİŞLETME (Veri Sözlüğü dokümanları ile)
+    # ================================================================
+
+    async def _enhance_query_with_dictionary(
+        self, query: str, query_embedding: List[float]
+    ) -> Tuple[str, List[str]]:
+        """
+        Veri sözlüğü chunk'larını arayarak sorguyu OTOMATİK genişlet.
+        Sözlük dokümanları yoksa sessizce atlar — sistem normal çalışır.
+
+        Returns:
+            (enhanced_query, target_section_headers)
+        """
+        try:
+            dict_result = await self.document_repository.search_dictionary(
+                embedding=query_embedding,
+                top_k=3
+            )
+
+            if not dict_result.documents:
+                return query, []
+
+            target_headers: List[str] = []
+            expansion_terms: List[str] = []
+
+            for doc in dict_result.documents:
+                header = self._get_chunk_header(doc)
+                if header:
+                    target_headers.append(header)
+
+                # İçerikten anahtar terimleri çıkar
+                snippet = doc.content[:500]
+                words = re.findall(r'[A-ZÜÖÇŞİĞa-züöçşığ]{4,}', snippet)
+                # En sık geçen terimleri al (Counter olmadan)
+                freq: Dict[str, int] = {}
+                for w in words:
+                    wl = w.lower()
+                    freq[wl] = freq.get(wl, 0) + 1
+                top = sorted(freq, key=freq.get, reverse=True)[:5]
+                expansion_terms.extend(top)
+
+            unique_terms = list(dict.fromkeys(expansion_terms))[:8]
+            if unique_terms:
+                enhanced = f"{query} ({', '.join(unique_terms)})"
+                logger.info(f"📖 Sözlük ile sorgu genişletildi: '{query}' → '{enhanced}'")
+                logger.info(f"📖 Hedef bölümler: {target_headers}")
+            else:
+                enhanced = query
+
+            return enhanced, target_headers
+
+        except Exception as e:
+            logger.debug(f"📖 Sözlük araması kullanılamıyor (normal): {e}")
+            return query, []
+
+    def _calc_header_similarity(self, chunk_header: str, target_headers: List[str]) -> float:
+        """
+        Chunk başlığı ile sözlüğün önerdiği hedef bölümler arasındaki benzerlik.
+        Tam eşleşme veya kelime örtüşmesi kullanır (embedding gerektirmez).
         """
         if not chunk_header or not target_headers:
             return 0.0
 
         h_upper = chunk_header.upper()
+        best = 0.0
         for th in target_headers:
-            if th.upper() in h_upper:
-                return section_boost
-        return 0.0
+            th_upper = th.upper()
+            # Tam eşleşme
+            if th_upper in h_upper or h_upper in th_upper:
+                return 0.25
+            # Kelime örtüşmesi
+            th_words = set(re.findall(r'[A-ZÜÖÇŞİĞa-züöçşığ]{3,}', th_upper))
+            h_words = set(re.findall(r'[A-ZÜÖÇŞİĞa-züöçşığ]{3,}', h_upper))
+            if th_words and h_words:
+                overlap = len(th_words & h_words) / max(len(th_words), len(h_words))
+                best = max(best, overlap * 0.25)
+
+        return best
 
     @staticmethod
     def _detect_type_from_filename(filename: str) -> str:
@@ -329,69 +354,56 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             return "Mali Veri Tabloları"
         return ""
 
-    def _rerank_chunks(self, documents: list, query: str, final_k: int) -> list:
+    def _rerank_chunks(self, documents: list, query: str, final_k: int,
+                       dict_headers: List[str] = None) -> list:
         """
-        Sorgu niyetine göre chunk'ları yeniden sırala.
-        
-        Strateji:
-        1. Sorgu niyetini tespit et (hangi doküman türü tercih edilmeli)
-        2. Tercih edilen türdeki chunk'ların skorunu boost et
-        3. Rakip doküman türüne ceza (penalty) uygula
-        4. Bölüm başlığı hedef bölümle eşleşiyorsa ek boost (section boost)
-        5. Çeşitlilik: tercih edilen türden %75, diğerlerinden %25
-        6. Final top_k kadar döndür
+        Chunk'ları çoklu OTOMATİK sinyal ile yeniden sırala.
+        Hardcoded bölüm kuralı kullanmaz — tüm sorgular için genel çalışır.
+
+        Sinyaller:
+        1. Doküman türü boost/penalty (QUERY_INTENT_RULES — üst düzey)
+        2. Genel içerik skoru (sayısallık, tablo, kelime örtüşmesi — otomatik)
+        3. Sözlük kaynaklı bölüm başlığı boost (varsa — dict_headers)
+        4. Çeşitlilik: tercih edilen türden %75
         """
         if not documents:
             return documents
 
         preferred_type = self._detect_query_intent(query)
-        
+
         if not preferred_type:
-            # Niyet tespit edilemedi → sadece section boost dene
-            target_headers, _, sec_boost = self._detect_target_sections(query)
-            if not target_headers:
-                logger.info("🔀 Sorgu niyeti tespit edilemedi, orijinal sıralama korunuyor")
-                return documents[:final_k]
-            # Section boost varsa uygula (doc_type boost olmadan)
+            # Niyet tespit edilemedi → sadece genel içerik sinyali + sözlük boost
             scored_docs = []
             for doc in documents:
                 sim = getattr(doc, 'similarity_score', 0)
+                content_adj = self._score_chunk_relevance(doc, query)
                 chunk_header = self._get_chunk_header(doc)
-                h_boost = self._calc_section_boost(chunk_header, target_headers, sec_boost)
-                scored_docs.append((sim + h_boost, "", chunk_header, doc))
+                header_adj = self._calc_header_similarity(chunk_header, dict_headers or [])
+                scored_docs.append((sim + content_adj + header_adj, "", chunk_header, doc))
             scored_docs.sort(key=lambda x: x[0], reverse=True)
-            final_docs = [x[3] for x in scored_docs[:final_k]]
-            logger.info(f"🔀 Section-only re-ranking: headers={target_headers}, boost={sec_boost}")
-            return final_docs
+            logger.info(f"🔀 Niyet yok, genel skorlama uygulandı (dict_headers={bool(dict_headers)})")
+            return [x[3] for x in scored_docs[:final_k]]
 
         boost = self._get_boost_for_type(preferred_type)
         competing_types = self.COMPETING_TYPES.get(preferred_type, [])
-        penalty = boost * 0.5  # Rakip tür cezası (boost'un yarısı)
+        penalty = boost * 0.5
 
-        # Section header hedeflerini al
-        target_headers, _, sec_boost = self._detect_target_sections(query)
-
-        # Her chunk'ın doküman türünü ve bölüm başlığını belirle
         scored_docs = []
         for doc in documents:
             sim = getattr(doc, 'similarity_score', 0)
             doc_type = ""
-            
-            # 1. Metadata'dan
+
+            # Doküman türünü tespit
             if hasattr(doc, 'metadata') and doc.metadata:
                 doc_type = doc.metadata.get('doc_type', '')
-            
-            # 2. Content prefix'inden  [Doküman Türü: X]
             if not doc_type and doc.content:
                 m = re.search(r'Doküman Türü:\s*([^\]\n]+)', doc.content)
                 if m:
                     doc_type = m.group(1).strip()
-
-            # 3. Dosya adından (son fallback)
             if not doc_type and doc.filename:
                 doc_type = self._detect_type_from_filename(doc.filename)
 
-            # === Doküman türü Boost / Penalty ===
+            # 1. Doküman türü boost/penalty
             if doc_type == preferred_type:
                 type_adj = boost
             elif doc_type in competing_types:
@@ -399,18 +411,19 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             else:
                 type_adj = 0.0
 
-            # === Bölüm başlığı Boost ===
+            # 2. Genel içerik skoru (otomatik)
+            content_adj = self._score_chunk_relevance(doc, query)
+
+            # 3. Sözlük kaynaklı bölüm başlığı boost
             chunk_header = self._get_chunk_header(doc)
-            header_adj = self._calc_section_boost(chunk_header, target_headers, sec_boost)
+            header_adj = self._calc_header_similarity(chunk_header, dict_headers or [])
 
-            boosted_sim = sim + type_adj + header_adj
-
+            boosted_sim = sim + type_adj + content_adj + header_adj
             scored_docs.append((boosted_sim, doc_type, chunk_header, doc))
 
-        # Boost'lu skora göre sırala
         scored_docs.sort(key=lambda x: x[0], reverse=True)
 
-        # Çeşitlilik: tercih edilen türden %75, diğerlerinden %25
+        # Çeşitlilik: tercih edilen türden %75
         preferred_chunks = [x for x in scored_docs if x[1] == preferred_type]
         other_chunks = [x for x in scored_docs if x[1] != preferred_type]
 
@@ -419,26 +432,21 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         remaining = final_k - len(result)
         result.extend(other_chunks[:remaining])
 
-        # Eğer hala yetmiyorsa, tercih edilenden kalan ekle
         if len(result) < final_k:
             result.extend(preferred_chunks[max_preferred:final_k - len(result)])
 
-        # Boost'lu skora göre son sıralama
         result.sort(key=lambda x: x[0], reverse=True)
-
         final_docs = [x[3] for x in result[:final_k]]
-        
+
         # Detaylı loglama
         type_counts: Dict[str, int] = {}
         header_counts: Dict[str, int] = {}
         for _, dt, hdr, _ in result[:final_k]:
             type_counts[dt] = type_counts.get(dt, 0) + 1
             if hdr:
-                hdr_short = hdr[:40]
-                header_counts[hdr_short] = header_counts.get(hdr_short, 0) + 1
+                header_counts[hdr[:40]] = header_counts.get(hdr[:40], 0) + 1
         logger.info(f"🔀 Re-ranking: preferred={preferred_type}, type_boost={boost}, "
-                     f"penalty={penalty}, section_boost={sec_boost}, "
-                     f"target_headers={target_headers}")
+                     f"content_scoring=auto, dict_headers={dict_headers is not None}")
         logger.info(f"🔀 Distribution: types={type_counts}, headers={header_counts}")
 
         return final_docs
@@ -457,23 +465,29 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         try:
             logger.info(f"🔍 Processing query: {query.query[:50]}... [User: {query.user_id}]")
 
-            # Step 1: Sorguyu genişlet ve embedding'e çevir
-            enhanced_query = self._enhance_query(query.query)
-            logger.info(f"📊 Embedding query (enhanced={enhanced_query != query.query})...")
-            query_embedding = await self.embedding_service.embed_text(enhanced_query)
-            
+            # Step 1: Sorguyu embedding'e çevir
+            logger.info("📊 Embedding query...")
+            query_embedding = await self.embedding_service.embed_text(query.query)
+
             if not query_embedding:
                 raise Exception("Embedding oluşturulamadı")
 
+            # Step 1.5: Sözlük-destekli sorgu genişletme (sözlük varsa otomatik)
+            enhanced_query, dict_headers = await self._enhance_query_with_dictionary(
+                query.query, query_embedding
+            )
+            if enhanced_query != query.query:
+                query_embedding = await self.embedding_service.embed_text(enhanced_query)
+
             # Step 2: Benzer dokümantasyonu ara (geniş aday havuzu)
-            candidate_k = query.top_k * 6  # 6x fazla aday çek (daha geniş aday havuzu)
+            candidate_k = query.top_k * 6
             logger.info(f"🔎 Searching similar documents (candidate_k={candidate_k}, final_k={query.top_k})...")
             search_result = await self.document_repository.search_similar(
                 embedding=query_embedding,
                 top_k=candidate_k,
                 threshold=0.0
             )
-            
+
             # Sonuç yoksa
             if not search_result.documents:
                 logger.warning("⚠️ No similar documents found")
@@ -486,9 +500,10 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     user_id=query.user_id
                 )
 
-            # Step 2.5: Akıllı re-ranking (sorgu niyetine göre)
+            # Step 2.5: Akıllı re-ranking (otomatik sinyaller + sözlük)
             reranked_docs = self._rerank_chunks(
-                search_result.documents, query.query, query.top_k
+                search_result.documents, query.query, query.top_k,
+                dict_headers=dict_headers
             )
 
             # Step 3: Kontekst oluştur + Kaynak izle (source tracking)
@@ -578,13 +593,19 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
         try:
             logger.info(f"🔍 Processing stream query: {query.query[:50]}... [User: {query.user_id}]")
 
-            # Step 1: Sorguyu genişlet ve embedding'e çevir
-            enhanced_query = self._enhance_query(query.query)
-            logger.info(f"📊 Embedding query (enhanced={enhanced_query != query.query})...")
-            query_embedding = await self.embedding_service.embed_text(enhanced_query)
-            
+            # Step 1: Sorguyu embedding'e çevir
+            logger.info("📊 Embedding query...")
+            query_embedding = await self.embedding_service.embed_text(query.query)
+
             if not query_embedding:
                 raise Exception("Embedding oluşturulamadı")
+
+            # Step 1.5: Sözlük-destekli sorgu genişletme (sözlük varsa otomatik)
+            enhanced_query, dict_headers = await self._enhance_query_with_dictionary(
+                query.query, query_embedding
+            )
+            if enhanced_query != query.query:
+                query_embedding = await self.embedding_service.embed_text(enhanced_query)
 
             # Step 2: Benzer dokümantasyonu ara (geniş aday havuzu)
             candidate_k = query.top_k * 6
@@ -594,15 +615,16 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                 top_k=candidate_k,
                 threshold=0.0
             )
-            
+
             if not search_result.documents:
                 logger.warning("⚠️ No similar documents found for stream")
                 yield "Sorgunuzla ilgili döküman bulunamadı."
                 return
 
-            # Step 2.5: Akıllı re-ranking
+            # Step 2.5: Akıllı re-ranking (otomatik sinyaller + sözlük)
             reranked_docs = self._rerank_chunks(
-                search_result.documents, query.query, query.top_k
+                search_result.documents, query.query, query.top_k,
+                dict_headers=dict_headers
             )
 
             # Step 3: Kontekst oluştur + Kaynak izle
