@@ -5,7 +5,8 @@ Advanced preprocessing, intelligent chunking, source tracking ve compliance
 """
 
 import logging
-from typing import Optional, List
+import re
+from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -108,6 +109,129 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         self.document_repository = document_repository
         self.llm_service = llm_service
 
+    # ================================================================
+    # SORGU NİYETİ TESPİTİ VE RE-RANKING
+    # ================================================================
+
+    # Anahtar kelime → tercih edilen doküman türü eşlemesi
+    # Tuple: (keywords, preferred_doc_type, boost_score)
+    QUERY_INTENT_RULES: List[Tuple[List[str], str, float]] = [
+        # Diğer bankalar → İstihbarat Raporu
+        (["diğer banka", "farklı banka", "harici risk", "harici limit",
+          "bankacılık risk", "sektör riski", "istihbarat", "diğer bankalardaki"],
+         "İstihbarat Raporu", 0.25),
+
+        # Genel risk, limit, teminat → Teklif Özeti
+        (["genel risk", "toplam risk", "grubun riski", "risk tablosu",
+          "limit bilgi", "teminat koşul", "rating", "kefil", "ortaklık yapı",
+          "teklif", "komite", "şube teklif", "kredi müdürlüğü"],
+         "Teklif Özeti", 0.25),
+
+        # Mali veriler → Mali Veri Tabloları
+        (["net satış", "aktif toplam", "özkaynak", "bilanço", "bilançe",
+          "gelir tablosu", "mali oran", "kısa vadeli", "uzun vadeli",
+          "dönen varlık", "duran varlık", "brüt kar", "faaliyet karı",
+          "esas faaliyet", "amortisman", "finansman gideri"],
+         "Mali Veri Tabloları", 0.20),
+
+        # Performans → Performans Değerlendirmesi
+        (["performans", "iş hacmi", "karlılık", "verimlilik", "büyüme oranı"],
+         "Performans Değerlendirmesi", 0.20),
+    ]
+
+    def _detect_query_intent(self, query: str) -> Optional[str]:
+        """
+        Sorgu metninden tercih edilen doküman türünü belirle.
+        Returns: Tercih edilen doküman türü veya None
+        """
+        q_lower = query.lower()
+        for keywords, doc_type, _ in self.QUERY_INTENT_RULES:
+            for kw in keywords:
+                if kw in q_lower:
+                    logger.info(f"🎯 Sorgu niyeti tespit edildi: '{kw}' → {doc_type}")
+                    return doc_type
+        return None
+
+    def _get_boost_for_type(self, doc_type: str) -> float:
+        """Doküman türü için boost değerini getir."""
+        for _, dtype, boost in self.QUERY_INTENT_RULES:
+            if dtype == doc_type:
+                return boost
+        return 0.0
+
+    def _rerank_chunks(self, documents: list, query: str, final_k: int) -> list:
+        """
+        Sorgu niyetine göre chunk'ları yeniden sırala.
+        
+        Strateji:
+        1. Sorgu niyetini tespit et (hangi doküman türü tercih edilmeli)
+        2. Tercih edilen türdeki chunk'ların skorunu boost et
+        3. Çeşitlilik sağla: her doküman türünden en az 1 chunk al
+        4. Final top_k kadar döndür
+        """
+        if not documents:
+            return documents
+
+        preferred_type = self._detect_query_intent(query)
+        
+        if not preferred_type:
+            # Niyet tespit edilemedi → orijinal sıralama
+            logger.info("🔀 Sorgu niyeti tespit edilemedi, orijinal sıralama korunuyor")
+            return documents[:final_k]
+
+        boost = self._get_boost_for_type(preferred_type)
+
+        # Her chunk'ın doküman türünü metadata veya content'ten belirle
+        scored_docs = []
+        for doc in documents:
+            sim = getattr(doc, 'similarity_score', 0)
+            doc_type = ""
+            
+            # 1. Metadata'dan
+            if hasattr(doc, 'metadata') and doc.metadata:
+                doc_type = doc.metadata.get('doc_type', '')
+            
+            # 2. Content prefix'inden  [Doküman Türü: X]
+            if not doc_type and doc.content:
+                m = re.search(r'Doküman Türü:\s*([^\]\n]+)', doc.content)
+                if m:
+                    doc_type = m.group(1).strip()
+
+            # Boost uygula
+            boosted_sim = sim + boost if doc_type == preferred_type else sim
+            scored_docs.append((boosted_sim, doc_type, doc))
+
+        # Boost'lu skora göre sırala
+        scored_docs.sort(key=lambda x: x[0], reverse=True)
+
+        # Çeşitlilik: tercih edilen türden en az yarısı, diğerlerinden de temsil
+        preferred_chunks = [x for x in scored_docs if x[1] == preferred_type]
+        other_chunks = [x for x in scored_docs if x[1] != preferred_type]
+
+        # Tercih edilen türden en fazla ceil(final_k * 0.6), kalanı diğerlerinden
+        max_preferred = max(1, int(final_k * 0.6))
+        result = preferred_chunks[:max_preferred]
+        remaining = final_k - len(result)
+        result.extend(other_chunks[:remaining])
+
+        # Eğer hala yetmiyorsa, tercih edilenden kalan ekle
+        if len(result) < final_k:
+            result.extend(preferred_chunks[max_preferred:final_k - len(result)])
+
+        # Boost'lu skora göre son sıralama
+        result.sort(key=lambda x: x[0], reverse=True)
+
+        final_docs = [x[2] for x in result[:final_k]]
+        
+        # Loglama
+        type_counts = {}
+        for _, dt, _ in result[:final_k]:
+            type_counts[dt] = type_counts.get(dt, 0) + 1
+        logger.info(f"🔀 Re-ranking: preferred={preferred_type}, boost={boost}, "
+                     f"distribution={type_counts}")
+
+        return final_docs
+
     async def execute(self, query: RAGQuery) -> RAGResponse:
         """
         Execute advanced RAG query pipeline with source tracking
@@ -129,11 +253,12 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             if not query_embedding:
                 raise Exception("Embedding oluşturulamadı")
 
-            # Step 2: Benzer dokümantasyonu ara (semantic search)
-            logger.info(f"🔎 Searching similar documents (top_k={query.top_k})...")
+            # Step 2: Benzer dokümantasyonu ara (geniş aday havuzu)
+            candidate_k = query.top_k * 4  # 4x fazla aday çek
+            logger.info(f"🔎 Searching similar documents (candidate_k={candidate_k}, final_k={query.top_k})...")
             search_result = await self.document_repository.search_similar(
                 embedding=query_embedding,
-                top_k=query.top_k,
+                top_k=candidate_k,
                 threshold=0.0
             )
             
@@ -149,12 +274,17 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     user_id=query.user_id
                 )
 
+            # Step 2.5: Akıllı re-ranking (sorgu niyetine göre)
+            reranked_docs = self._rerank_chunks(
+                search_result.documents, query.query, query.top_k
+            )
+
             # Step 3: Kontekst oluştur + Kaynak izle (source tracking)
-            logger.info(f"📝 Building context from {len(search_result.documents)} chunks...")
+            logger.info(f"📝 Building context from {len(reranked_docs)} chunks...")
             context_parts = []
             sources_with_metadata: List[SourceWithMetadata] = []
             
-            for idx, doc in enumerate(search_result.documents):
+            for idx, doc in enumerate(reranked_docs):
                 # Metadata'dan başlık bilgisini al
                 header = None
                 if hasattr(doc, 'metadata') and doc.metadata:
@@ -242,11 +372,12 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             if not query_embedding:
                 raise Exception("Embedding oluşturulamadı")
 
-            # Step 2: Benzer dokümantasyonu ara
-            logger.info(f"🔎 Searching similar documents (top_k={query.top_k})...")
+            # Step 2: Benzer dokümantasyonu ara (geniş aday havuzu)
+            candidate_k = query.top_k * 4
+            logger.info(f"🔎 Searching similar documents (candidate_k={candidate_k}, final_k={query.top_k})...")
             search_result = await self.document_repository.search_similar(
                 embedding=query_embedding,
-                top_k=query.top_k,
+                top_k=candidate_k,
                 threshold=0.0
             )
             
@@ -255,12 +386,17 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                 yield "Sorgunuzla ilgili döküman bulunamadı."
                 return
 
+            # Step 2.5: Akıllı re-ranking
+            reranked_docs = self._rerank_chunks(
+                search_result.documents, query.query, query.top_k
+            )
+
             # Step 3: Kontekst oluştur + Kaynak izle
-            logger.info(f"📝 Building context from {len(search_result.documents)} chunks...")
+            logger.info(f"📝 Building context from {len(reranked_docs)} chunks...")
             context_parts = []
             sources_with_metadata: List[SourceWithMetadata] = []
             
-            for idx, doc in enumerate(search_result.documents):
+            for idx, doc in enumerate(reranked_docs):
                 # Metadata'dan başlık bilgisini al
                 header = None
                 if hasattr(doc, 'metadata') and doc.metadata:
