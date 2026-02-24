@@ -411,6 +411,35 @@ class DocumentIngestionUseCase:
             return "Mali Veri Tabloları"
 
         return "Genel Doküman"
+
+    def _is_dictionary_doc(self, filename: str, text: str = "") -> bool:
+        """
+        Dosyanın veri sözlüğü dokümanı olup olmadığını tespit et.
+        
+        Tespit kriterleri:
+        1. Dosya adında 'sözlük', 'sozluk', 'dictionary', 'açıklama', 'rehber' geçmesi
+        2. İçerikte sözlük kalıpları (alan açıklamaları, tanımlar)
+        3. API tarafından is_dictionary=true gönderilmesi (metadata ile)
+        """
+        fname_lower = filename.lower()
+        dict_keywords = ["sözlük", "sozluk", "dictionary", "açıklama", "aciklama",
+                         "rehber", "tanım", "tanim", "veri_sozlugu", "data_dict"]
+        if any(kw in fname_lower for kw in dict_keywords):
+            return True
+        
+        # İçerik analizi: sözlük dokümanları genellikle alan tanımları içerir
+        if text:
+            sample = text[:3000].lower()
+            definition_patterns = [
+                "bu bölüm", "bu alan", "bu sütun", "açıklama:",
+                "tanım:", "içerik:", "ne anlama gelir",
+                "bu tablo", "bu rapor", "bu doküman",
+            ]
+            matches = sum(1 for p in definition_patterns if p in sample)
+            if matches >= 3:
+                return True
+        
+        return False
  
     
     def _chunk_text(self, text: str) -> List[str]:
@@ -494,7 +523,8 @@ class DocumentIngestionUseCase:
             #Kaynak prefix ekle
             doc_label = filename.rsplit(".", 1)[0].replace("-", " ").replace("_", " ").title()
             doc_type = self._detect_document_type(filename, text)
-            logger.info(f"📑 Doküman türü tespit edildi: {doc_type}")
+            is_dictionary = self._is_dictionary_doc(filename, text)
+            logger.info(f"📑 Doküman türü: {doc_type}, Sözlük: {is_dictionary}")
             chunks = [f"[Kaynak: {doc_label} | Doküman Türü: {doc_type}]\n\n{c}" for c in chunks]
  
             # Step 3: Embedding'ler oluştur
@@ -537,7 +567,9 @@ class DocumentIngestionUseCase:
 
                         "chunk_position": chunk_objects[idx].get('position'),
 
-                        "doc_type": doc_type
+                        "doc_type": doc_type,
+
+                        "is_dictionary": is_dictionary
 
                     }
 
