@@ -106,6 +106,38 @@ class IDocumentRepository(ABC):
  
     @abstractmethod
 
+    async def search_dictionary(
+
+        self,
+
+        embedding: List[float],
+
+        top_k: int = 5
+
+    ) -> SearchResult:
+
+        """
+
+        Sadece veri sözlüğü chunk'larını ara (is_dictionary=true metadata).
+
+        Sözlük dokümanı yoksa boş SearchResult döndür.
+
+        Args:
+
+            embedding: Arama embedding'i
+
+            top_k: Döndürülecek en iyi k sonuç
+
+        Returns:
+
+            SearchResult: Sözlük chunk'ları
+
+        """
+
+        pass
+
+    @abstractmethod
+
     async def get_by_filename(self, filename: str) -> List[DocumentChunk]:
 
         """
