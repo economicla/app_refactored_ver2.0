@@ -72,6 +72,7 @@ class HTMLStructuredConverter:
         self._clean_soup(soup)
 
         format_type = self._detect_format(soup)
+        self.detected_format = format_type
         logger.info(f"📋 HTML format tespit edildi: {format_type}")
 
         if format_type == "teklif":
