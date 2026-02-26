@@ -478,6 +478,179 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         return ""
 
     # ================================================================
+    # BANK NAME NORMALIZATION (Entity Resolution)
+    # Uses İstihbarat Raporu content as the source-of-truth dictionary.
+    # No hardcoded bank lists — all names come from the report itself.
+    # ================================================================
+
+    _BANK_NAME_STOP_WORDS = frozenset({
+        "türkiye", "t.c.", "tc", "cumhuriyeti",
+        "bankası", "bankasi", "bank", "bankas",
+        "a.ş.", "a.ş", "aş", "a.s.", "as",
+        "t.a.ş.", "t.a.ş", "taş",
+        "ve",
+    })
+
+    _OFFICIAL_BANK_RE = re.compile(
+        r'([A-ZÜÖÇŞİĞT]'
+        r'[A-ZÜÖÇŞİĞa-züöçşığ\s\.\'\-&]{2,60}?'
+        r'(?:[Bb]ankası|[Bb]ankas[ıi]|[Bb]ank)'
+        r'(?:\s*(?:A\.?\s?Ş\.?|T\.?\s?A\.?\s?Ş\.?))?)',
+        re.UNICODE
+    )
+
+    _QUERY_BANK_RE = re.compile(
+        r'([A-ZÜÖÇŞİĞa-züöçşığ]+'
+        r'(?:\s+[A-ZÜÖÇŞİĞa-züöçşığ]+)*?)'
+        r"\s+(?:bankası|bankas[ıi]|bankası')",
+        re.IGNORECASE | re.UNICODE
+    )
+
+    @classmethod
+    def _tokenize_bank_name(cls, name: str) -> set:
+        """Extract meaningful tokens, ignoring stop words and punctuation."""
+        raw = re.findall(r'[a-züöçşığA-ZÜÖÇŞİĞ]{2,}', name.lower())
+        return {t for t in raw if t not in cls._BANK_NAME_STOP_WORDS}
+
+    def _extract_bank_index_from_chunks(self, chunks: list) -> List[str]:
+        """
+        Scan İstihbarat Raporu chunks for official bank names.
+        Uses regex to find "... Bankası A.Ş." patterns in chunk content.
+        Returns deduplicated list of official bank names.
+        """
+        seen: set = set()
+        bank_names: List[str] = []
+
+        for doc in chunks:
+            content = getattr(doc, 'content', '')
+            for m in self._OFFICIAL_BANK_RE.finditer(content):
+                raw = m.group(1).strip().rstrip('.')
+                if len(raw) > 5:
+                    key = raw.lower()
+                    if key not in seen:
+                        seen.add(key)
+                        bank_names.append(raw)
+
+        logger.info(f"🏦 Bank index: {len(bank_names)} names from {len(chunks)} chunks")
+        for name in bank_names[:10]:
+            logger.debug(f"  🏦 {name}")
+        return bank_names
+
+    @classmethod
+    def _extract_bank_mention(cls, query: str) -> Optional[str]:
+        """
+        Extract the informal bank name mention from a user query.
+        "Emlak Bankası'ndaki limit..." → "Emlak Bankası"
+        """
+        m = cls._QUERY_BANK_RE.search(query)
+        if m:
+            prefix = m.group(1).strip()
+            if len(prefix) >= 2:
+                return f"{prefix} Bankası"
+        return None
+
+    def _normalize_bank_name(
+        self,
+        mention: str,
+        bank_index: List[str]
+    ) -> Dict:
+        """
+        Fuzzy-match a user's bank mention against the official bank index.
+        Score = fraction of mention tokens found in official name tokens.
+        """
+        if not mention or not bank_index:
+            return {
+                "normalized_bank_name": None,
+                "original_bank_mention": mention,
+                "match_confidence": "none",
+                "match_score": 0.0,
+            }
+
+        mention_tokens = self._tokenize_bank_name(mention)
+        if not mention_tokens:
+            return {
+                "normalized_bank_name": None,
+                "original_bank_mention": mention,
+                "match_confidence": "none",
+                "match_score": 0.0,
+            }
+
+        best_name: Optional[str] = None
+        best_score = 0.0
+
+        for official in bank_index:
+            official_tokens = self._tokenize_bank_name(official)
+            if not official_tokens:
+                continue
+            overlap = len(mention_tokens & official_tokens)
+            score = overlap / len(mention_tokens)
+            if score > best_score:
+                best_score = score
+                best_name = official
+
+        if best_score >= 0.8:
+            confidence = "high"
+        elif best_score >= 0.5:
+            confidence = "medium"
+        elif best_score > 0:
+            confidence = "low"
+        else:
+            confidence = "none"
+            best_name = None
+
+        if confidence == "none":
+            best_name = None
+
+        result = {
+            "normalized_bank_name": best_name,
+            "original_bank_mention": mention,
+            "match_confidence": confidence,
+            "match_score": round(best_score, 2),
+        }
+
+        if best_name:
+            logger.info(
+                f"🏦 Bank normalized: '{mention}' → '{best_name}' "
+                f"(confidence={confidence}, score={best_score:.2f})"
+            )
+        else:
+            logger.info(
+                f"🏦 Bank not matched: '{mention}' (best_score={best_score:.2f})"
+            )
+        return result
+
+    def _resolve_bank_entity(
+        self,
+        query: str,
+        chunks: list
+    ) -> Optional[Dict]:
+        """
+        Full bank entity resolution pipeline:
+        1. Extract bank mention from query
+        2. Build bank index from İstihbarat chunks
+        3. Fuzzy match mention → official name
+
+        Returns normalization result dict, or None if no bank mention found.
+        """
+        mention = self._extract_bank_mention(query)
+        if not mention:
+            return None
+
+        bank_index = self._extract_bank_index_from_chunks(chunks)
+        if not bank_index:
+            return {
+                "normalized_bank_name": None,
+                "original_bank_mention": mention,
+                "match_confidence": "none",
+                "match_score": 0.0,
+                "bank_index_size": 0,
+            }
+
+        result = self._normalize_bank_name(mention, bank_index)
+        result["bank_index_size"] = len(bank_index)
+        return result
+
+    # ================================================================
     # DOCUMENT-TYPE-AWARE STRICT RETRIEVAL
     # ================================================================
 
@@ -591,6 +764,11 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 f"doc_type={doc_type} | sim={sim:.3f}"
             )
         debug["top3_chunks"] = top3
+
+        # Bank entity resolution — only when EXTERNAL_BANK routing fires
+        if routing and routing.get("matched_rule_id") == "EXTERNAL_BANK":
+            bank_resolution = self._resolve_bank_entity(query_text, candidates)
+            debug["bank_normalization"] = bank_resolution
 
         return reranked, debug
 
