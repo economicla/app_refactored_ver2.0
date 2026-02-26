@@ -369,7 +369,9 @@ async def query_documents(
 
             model=result.model,
 
-            timestamp=result.timestamp
+            timestamp=result.timestamp,
+
+            debug_info=result.debug_info
 
         )
 
@@ -452,6 +454,9 @@ async def stream_query_generator(
                 for doc in result.sources
             ]
             yield f"data: {json.dumps({'sources': sources_data})}\n\n"
+
+        if result.debug_info:
+            yield f"data: {json.dumps({'debug_info': result.debug_info})}\n\n"
         response_time_ms = int((time.time() - start_time) * 1000)
 
         try:
@@ -1140,8 +1145,32 @@ async def delete_document(
         logger.error(f"❌ Delete failed: {str(e)}")
 
         raise HTTPException(status_code=500, detail=str(e))
- 
 
+
+@router.delete("/documents/by-filename/{filename}")
+async def delete_document_by_filename(
+    filename: str,
+    container: DIContainer = Depends(get_di_container)
+):
+    """
+    Dosya adına göre TÜM chunk'ları sil.
+    Örn: DELETE /api/v2/documents/by-filename/topbas-performans.html
+    """
+    try:
+        repo = container.get_document_repository()
+        deleted_count = await repo.delete_by_filename(filename)
+        if deleted_count > 0:
+            logger.info(f"✅ Deleted {deleted_count} chunks for {filename}")
+            return {"status": "deleted", "filename": filename, "chunks_deleted": deleted_count}
+        else:
+            raise HTTPException(status_code=404, detail=f"No documents found for '{filename}'")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Delete by filename failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+ 
 @router.get("/info/system", response_model=dict)
 
 async def system_information(container: DIContainer = Depends(get_di_container)):
