@@ -9,7 +9,7 @@ core/entities'deki modelleri baz alan, Pydantic compatible
 
 from pydantic import BaseModel, Field
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from datetime import datetime
  
@@ -91,20 +91,25 @@ class RAGQueryResponse(BaseModel):
     model: str
 
     timestamp: datetime
+
+    debug_info: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Retrieval debug: preferred_type, retrieval_mode, filtered_count, top3_chunks"
+    )
  
     class Config:
 
         example = {
 
-            "question": "eğitim prosedürü nedir?",
+            "question": "nakdi risk ne kadar?",
 
-            "answer": "Eğitim prosedürü, bankanın tüm eğitim faaliyetlerini...",
+            "answer": "Grubun toplam nakdi riski...",
 
             "sources": [
 
                 {
 
-                    "filename": "egitim_proseduru.docx",
+                    "filename": "teklif_ozeti.pdf",
 
                     "chunk_index": 0,
 
@@ -116,7 +121,23 @@ class RAGQueryResponse(BaseModel):
 
             "model": "openai/gpt-oss-120b",
 
-            "timestamp": "2026-02-06T12:00:00"
+            "timestamp": "2026-02-06T12:00:00",
+
+            "debug_info": {
+
+                "preferred_type": "Teklif Özeti",
+
+                "retrieval_mode": "STRICT_FILTERED",
+
+                "filtered_count": 12,
+
+                "top3_chunks": [
+
+                    {"rank": 1, "filename": "teklif.pdf", "doc_type": "Teklif Özeti", "similarity_score": 0.85}
+
+                ]
+
+            }
 
         }
  
