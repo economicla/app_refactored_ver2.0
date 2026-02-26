@@ -651,6 +651,109 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         return result
 
     # ================================================================
+    # BANK-SCOPE GROUNDING GUARDRAIL
+    # Prevents hallucination by ensuring answers reference verified bank data.
+    # ================================================================
+
+    BANK_NOT_FOUND_ANSWER = (
+        "Belirtilen banka, raporun 'Banka istihbaratı' bölümündeki banka listesinde "
+        "bulunamadı. Bu nedenle başka tablolara ait sayısal veriler paylaşılmamaktadır.\n\n"
+        "Lütfen resmi banka adını paylaşır mısınız? "
+        "(Örnek: 'Türkiye Emlak Katılım Bankası A.Ş.')"
+    )
+
+    BANK_NO_DATA_ANSWER_TEMPLATE = (
+        "'{bank_name}' raporda tanınmaktadır; ancak mevcut bağlam parçalarında "
+        "bu bankaya ait spesifik veri bulunamamıştır. "
+        "Lütfen sorunuzu daraltarak veya farklı bir ifadeyle tekrar deneyiniz."
+    )
+
+    BANK_GUARDRAIL_CONFIDENCE_THRESHOLD = ("medium", "high")
+
+    @classmethod
+    def _bank_search_key(cls, official_name: str) -> str:
+        """Strip common prefix/suffix to produce a substring search key."""
+        key = official_name.strip()
+        low = key.lower()
+        for p in ("türkiye ", "t.c. "):
+            if low.startswith(p):
+                key = key[len(p):]
+                low = key.lower()
+                break
+        for s in (" a.ş.", " a.ş", " a.s.", " t.a.ş.", " t.a.ş"):
+            if low.endswith(s):
+                key = key[:len(key) - len(s)]
+                break
+        return key.strip().lower()
+
+    def _apply_bank_guardrail(
+        self,
+        bank_resolution: Dict,
+        reranked_docs: list,
+    ) -> Dict:
+        """
+        Bank-scope grounding guardrail.
+
+        - If normalized_bank_name is null or confidence < threshold → block.
+        - Otherwise verify that at least one reranked chunk actually contains
+          the official bank name; if yes, scope to only those chunks.
+        """
+        norm_name = bank_resolution.get("normalized_bank_name")
+        confidence = bank_resolution.get("match_confidence", "none")
+
+        if not norm_name or confidence not in self.BANK_GUARDRAIL_CONFIDENCE_THRESHOLD:
+            logger.info(
+                f"🛡️ Bank guardrail BLOCKED: norm={norm_name}, "
+                f"confidence={confidence} (below threshold)"
+            )
+            return {
+                "passed": False,
+                "reason": "bank_not_resolved",
+                "safe_answer": self.BANK_NOT_FOUND_ANSWER,
+                "bank_scoped_chunks_used": [],
+                "scoped_count": 0,
+            }
+
+        search_key = self._bank_search_key(norm_name)
+        scoped: list = []
+        scoped_info: List[Dict] = []
+
+        for doc in reranked_docs:
+            content_lower = getattr(doc, 'content', '').lower()
+            if search_key and search_key in content_lower:
+                scoped.append(doc)
+                scoped_info.append({
+                    "filename": doc.filename,
+                    "chunk_index": getattr(doc, 'chunk_index', None),
+                })
+
+        if scoped:
+            logger.info(
+                f"🛡️ Bank guardrail PASSED: '{norm_name}' (key='{search_key}') "
+                f"found in {len(scoped)}/{len(reranked_docs)} chunks"
+            )
+            return {
+                "passed": True,
+                "reason": "ok",
+                "safe_answer": None,
+                "bank_scoped_chunks_used": scoped_info,
+                "scoped_count": len(scoped),
+                "scoped_docs": scoped,
+            }
+
+        logger.info(
+            f"🛡️ Bank guardrail FAILED: '{norm_name}' (key='{search_key}') "
+            f"not found in any of {len(reranked_docs)} chunks"
+        )
+        return {
+            "passed": False,
+            "reason": "bank_not_in_context",
+            "safe_answer": self.BANK_NO_DATA_ANSWER_TEMPLATE.format(bank_name=norm_name),
+            "bank_scoped_chunks_used": [],
+            "scoped_count": 0,
+        }
+
+    # ================================================================
     # DOCUMENT-TYPE-AWARE STRICT RETRIEVAL
     # ================================================================
 
@@ -765,10 +868,22 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             )
         debug["top3_chunks"] = top3
 
-        # Bank entity resolution — only when EXTERNAL_BANK routing fires
+        # Bank entity resolution + guardrail — only when EXTERNAL_BANK routing fires
         if routing and routing.get("matched_rule_id") == "EXTERNAL_BANK":
             bank_resolution = self._resolve_bank_entity(query_text, candidates)
             debug["bank_normalization"] = bank_resolution
+
+            # Guardrail activates only when user mentions a specific bank
+            if bank_resolution is not None:
+                guardrail = self._apply_bank_guardrail(bank_resolution, reranked)
+                scoped_docs = guardrail.pop("scoped_docs", None)
+                debug["bank_guardrail"] = guardrail
+
+                if not guardrail["passed"]:
+                    return [], debug
+
+                if scoped_docs:
+                    reranked = scoped_docs
 
         return reranked, debug
 
@@ -896,6 +1011,25 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 top_k=query.top_k,
                 dict_headers=dict_headers
             )
+
+            # Bank-scope guardrail — deterministic safe answer, no LLM call
+            bank_guardrail = debug_info.get("bank_guardrail")
+            if bank_guardrail and not bank_guardrail.get("passed", True):
+                safe_answer = bank_guardrail.get("safe_answer",
+                                                  "Sorgunuzla ilgili döküman bulunamadı.")
+                logger.info(
+                    f"🛡️ Bank guardrail blocked LLM call: "
+                    f"{bank_guardrail.get('reason')}"
+                )
+                return RAGResponse(
+                    question=query.query,
+                    answer=safe_answer,
+                    sources=[],
+                    model=await self.llm_service.get_model_name(),
+                    timestamp=datetime.utcnow(),
+                    user_id=query.user_id,
+                    debug_info=debug_info
+                )
 
             if not reranked_docs:
                 logger.warning("⚠️ No similar documents found")
@@ -1025,6 +1159,18 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                 top_k=query.top_k,
                 dict_headers=dict_headers
             )
+
+            # Bank-scope guardrail — deterministic safe answer, no LLM call
+            bank_guardrail = debug_info.get("bank_guardrail")
+            if bank_guardrail and not bank_guardrail.get("passed", True):
+                safe_answer = bank_guardrail.get("safe_answer",
+                                                  "Sorgunuzla ilgili döküman bulunamadı.")
+                logger.info(
+                    f"🛡️ Bank guardrail blocked stream: "
+                    f"{bank_guardrail.get('reason')}"
+                )
+                yield safe_answer
+                return
 
             if not reranked_docs:
                 logger.warning("⚠️ No similar documents found for stream")
