@@ -353,6 +353,19 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
 
         return best
 
+    def _resolve_doc_type(self, doc) -> str:
+        """Chunk'ın doküman türünü metadata, içerik veya dosya adından tespit et."""
+        doc_type = ""
+        if hasattr(doc, 'metadata') and doc.metadata:
+            doc_type = doc.metadata.get('doc_type', '')
+        if not doc_type and doc.content:
+            m = re.search(r'Doküman Türü:\s*([^\]\n]+)', doc.content)
+            if m:
+                doc_type = m.group(1).strip()
+        if not doc_type and doc.filename:
+            doc_type = self._detect_type_from_filename(doc.filename)
+        return doc_type or "Genel Doküman"
+
     @staticmethod
     def _detect_type_from_filename(filename: str) -> str:
         """Dosya adından doküman türünü tespit et (son fallback)."""
@@ -404,17 +417,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         scored_docs = []
         for doc in documents:
             sim = getattr(doc, 'similarity_score', 0)
-            doc_type = ""
-
-            # Doküman türünü tespit
-            if hasattr(doc, 'metadata') and doc.metadata:
-                doc_type = doc.metadata.get('doc_type', '')
-            if not doc_type and doc.content:
-                m = re.search(r'Doküman Türü:\s*([^\]\n]+)', doc.content)
-                if m:
-                    doc_type = m.group(1).strip()
-            if not doc_type and doc.filename:
-                doc_type = self._detect_type_from_filename(doc.filename)
+            doc_type = self._resolve_doc_type(doc)
 
             # 1. Doküman türü boost/penalty
             if doc_type == preferred_type:
@@ -530,17 +533,21 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 if hasattr(doc, 'metadata') and doc.metadata:
                     header = doc.metadata.get('header')
                 
+                # Doküman türünü tespit et
+                doc_type = self._resolve_doc_type(doc)
+
                 # DEBUG: İlk chunk'ın içeriğini logla
                 if idx == 0:
                     logger.info(f"📋 Top chunk [{doc.filename}] header={header} "
+                                f"type={doc_type} "
                                 f"sim={getattr(doc, 'similarity_score', 0):.3f} "
                                 f"len={len(doc.content)} "
                                 f"preview={doc.content[:300]}")
                 
-                # Context'e ekle
+                # Context'e ekle — doküman türü etiketi modelin görebilmesi için başa eklenir
                 header_text = f" [{header}]" if header else ""
                 context_parts.append(
-                    f"[Kaynak {idx+1}: {doc.filename}{header_text}]\n{doc.content}"
+                    f"[Kaynak {idx+1}: {doc.filename}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
                 )
                 
                 # Detaylı kaynak bilgisi
@@ -651,10 +658,13 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                 if hasattr(doc, 'metadata') and doc.metadata:
                     header = doc.metadata.get('header')
                 
-                # Context'e ekle
+                # Doküman türünü tespit et
+                doc_type = self._resolve_doc_type(doc)
+
+                # Context'e ekle — doküman türü etiketi modelin görebilmesi için başa eklenir
                 header_text = f" [{header}]" if header else ""
                 context_parts.append(
-                    f"[Kaynak {idx+1}: {doc.filename}{header_text}]\n{doc.content}"
+                    f"[Kaynak {idx+1}: {doc.filename}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
                 )
                 
                 # Detaylı kaynak bilgisi
