@@ -815,13 +815,33 @@ async def debug_query(
         if enhanced_query != request.query:
             query_embedding = await rag_use_case.embedding_service.embed_text(enhanced_query)
 
-        # Step 2: Strict filtered retrieval + rerank (LLM'siz)
+        # Step 2: Strict filtered retrieval + rerank + bank guardrail (LLM'siz)
         reranked_docs, debug_info = await rag_use_case._retrieve_documents(
             query_embedding=query_embedding,
             query_text=request.query,
             top_k=request.top_k,
             dict_headers=dict_headers
         )
+
+        # Bank guardrail may have blocked — surface that clearly
+        bank_guardrail = debug_info.get("bank_guardrail")
+        guardrail_blocked = (
+            bank_guardrail is not None
+            and not bank_guardrail.get("passed", True)
+        )
+
+        if guardrail_blocked:
+            return {
+                "query": request.query,
+                "enhanced_query": enhanced_query if enhanced_query != request.query else None,
+                "debug_info": debug_info,
+                "guardrail_blocked": True,
+                "safe_answer": bank_guardrail.get("safe_answer"),
+                "chunks_retrieved": 0,
+                "chunks_detail": [],
+                "full_prompt_length": 0,
+                "full_prompt": None
+            }
 
         # Build context + chunks detail
         context_parts = []
@@ -856,6 +876,7 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             "query": request.query,
             "enhanced_query": enhanced_query if enhanced_query != request.query else None,
             "debug_info": debug_info,
+            "guardrail_blocked": False,
             "chunks_retrieved": len(reranked_docs),
             "chunks_detail": chunks_detail,
             "full_prompt_length": len(prompt),
