@@ -401,7 +401,12 @@ class PostgresDocumentAdapter(IDocumentRepository):
                     select(DocumentModel, distance.label('distance'))
                     .where(DocumentModel.deleted_at.is_(None))
                     .where(
-                        text("(doc_metadata->>'is_dictionary') IS DISTINCT FROM 'true'")
+                        text(
+                            "(doc_metadata->>'is_dictionary') IS DISTINCT FROM 'true'"
+                            " AND lower(filename) NOT LIKE '%sozluk%'"
+                            " AND lower(filename) NOT LIKE '%sözlük%'"
+                            " AND lower(filename) NOT LIKE '%dictionary%'"
+                        )
                     )
                     .order_by(distance)
                     .limit(top_k)
@@ -441,9 +446,10 @@ class PostgresDocumentAdapter(IDocumentRepository):
         self,
         embedding: List[float],
         document_id: Optional[str] = None,
+        doc_type: Optional[str] = None,
         top_k: int = 5
     ) -> SearchResult:
-        """Document ID'ye göre filtered search (sadece belirli dokümanda ara)"""
+        """Document ID veya doc_type'a göre filtered search"""
         async with await self._get_session() as session:
             try:
                 distance = DocumentModel.embedding.cosine_distance(embedding)
@@ -452,14 +458,25 @@ class PostgresDocumentAdapter(IDocumentRepository):
                     select(DocumentModel, distance.label('distance'))
                     .where(DocumentModel.deleted_at.is_(None))
                     .where(
-                        text("(doc_metadata->>'is_dictionary') IS DISTINCT FROM 'true'")
+                        text(
+                            "(doc_metadata->>'is_dictionary') IS DISTINCT FROM 'true'"
+                            " AND lower(filename) NOT LIKE '%sozluk%'"
+                            " AND lower(filename) NOT LIKE '%sözlük%'"
+                            " AND lower(filename) NOT LIKE '%dictionary%'"
+                        )
                     )
                 )
 
-                #Eğer document_id varsa, sadece o dokümandan ara
                 if document_id:
                     query = query.where(DocumentModel.filename == document_id)
                     logger.info(f"🔍 Filtered search in document: {document_id}")
+                elif doc_type:
+                    query = query.where(
+                        text("doc_metadata->>'doc_type' = :filter_doc_type").bindparams(
+                            filter_doc_type=doc_type
+                        )
+                    )
+                    logger.info(f"🔍 Filtered search by doc_type: {doc_type}")
                 else:
                     logger.info("🔍 Global search (no filter)")
 
@@ -510,7 +527,12 @@ class PostgresDocumentAdapter(IDocumentRepository):
                     select(DocumentModel, distance.label('distance'))
                     .where(DocumentModel.deleted_at.is_(None))
                     .where(
-                        text("doc_metadata->>'is_dictionary' = 'true'")
+                        text(
+                            "(doc_metadata->>'is_dictionary' = 'true'"
+                            " OR lower(filename) LIKE '%sozluk%'"
+                            " OR lower(filename) LIKE '%sözlük%'"
+                            " OR lower(filename) LIKE '%dictionary%')"
+                        )
                     )
                     .order_by(distance)
                     .limit(top_k)
