@@ -110,71 +110,146 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         self.llm_service = llm_service
 
     # ================================================================
-    # SORGU NİYETİ TESPİTİ VE RE-RANKING
+    # PRIORITY-ORDERED ROUTING RULES
+    # Evaluated in list order (highest priority first); first match wins.
+    # This guarantees deterministic, explainable routing.
     # ================================================================
 
-    # Anahtar kelime → tercih edilen doküman türü eşlemesi
-    # Tuple: (keywords, preferred_doc_type, boost_score)
-    QUERY_INTENT_RULES: List[Tuple[List[str], str, float]] = [
-        # Diğer bankalar → İstihbarat Raporu
-        (["diğer banka", "farklı banka", "harici risk", "harici limit",
-          "bankacılık risk", "sektör riski", "istihbarat", "diğer bankalardaki",
-          "dış risk", "harici teminat", "diğer bankalar"],
-         "İstihbarat Raporu", 0.30),
-
-        # Genel risk, limit, teminat → Teklif Özeti (öncelikli, genel risk sorguları)
-        (["genel risk", "toplam risk", "grubun riski", "grubun risk",
-          "nakdi risk", "nakdi riski", "nakit risk", "nakit riski",
-          "gayrinakdi risk", "gayrinakdi riski", "gayri nakdi risk", "gayri nakdi riski",
-          "gayrinakdi", "gayri nakdi",
-          "nakdi limit", "nakdi limiti", "gayrinakdi limit", "gayrinakdi limiti",
-          "grubun nakdi", "grubun gayrinakdi", "nakdi ve gayrinakdi",
-          "risk tablosu", "risk nedir", "riski nedir", "risk durumu",
-          "riski ne kadar", "risk ne kadar", "ne kadar risk",
-          "mevcut risk", "güncel risk", "risk yapısı", "kredi riski",
-          "limit bilgi", "limit nedir", "limiti nedir", "limiti ne kadar",
-          "limit türü", "limit türleri", "limit yapısı",
-          "teminat koşul", "teminat koşulları", "teminat şart", "teminat şartları",
-          "teminat nedir", "teminat yapısı", "teminata bağlı",
-          "tahsis edil", "tahsis edilecek", "tahsis edilen",
-          "önerilen limit", "önerilen risk", "önerilen teminat",
-          "teklif edilen", "teklif edilen limit", "teklif edilen risk",
-          "rating", "kefil", "kefalet", "kefiller", "ortaklık yapı",
-          "teklif", "komite", "şube teklif", "kredi müdürlüğü",
-          "teklif özet", "kredi teklif", "kredi tahsis"],
-         "Teklif Özeti", 0.35),
-
-        # Mali veriler → Mali Veri Tabloları
-        (["net satış", "aktif toplam", "özkaynak", "bilanço", "bilançe",
-          "gelir tablosu", "mali oran", "kısa vadeli", "uzun vadeli",
-          "dönen varlık", "duran varlık", "brüt kar", "faaliyet karı",
-          "esas faaliyet", "amortisman", "finansman gideri",
-          "mali veri", "finansal tablo"],
-         "Mali Veri Tabloları", 0.25),
-
-        # Performans → Performans Değerlendirmesi
-        (["performans", "iş hacmi", "karlılık", "verimlilik", "büyüme oranı"],
-         "Performans Değerlendirmesi", 0.25),
+    ROUTING_RULES: List[Dict] = [
+        # P100: External / specific bank signal → İstihbarat Raporu
+        # MUST be evaluated BEFORE risk/limit/teminat rules to prevent
+        # "Emlak Bankası'ndaki teminat şartları" from routing to Teklif Özeti
+        {
+            "rule_id": "EXTERNAL_BANK",
+            "rule_name": "Harici/Spesifik Banka Sinyali",
+            "priority": 100,
+            "doc_type": "İstihbarat Raporu",
+            "keywords": [
+                # Named/specific bank suffixes (Turkish morphology)
+                "bankası", "bankasındaki", "bankasında", "bankasından", "bankasına",
+                "bankası'ndaki", "bankası'nda", "bankası'ndan",
+                # General external bank context
+                "bankadaki", "bankada", "bankadan",
+                "banka nezdinde", "nezdindeki", "nezdinde",
+                "banka bazında", "bankalara göre", "bankalar nezdinde",
+                # Existing İstihbarat keywords
+                "diğer banka", "diğer bankalar", "diğer bankalardaki",
+                "farklı banka", "farklı bankalardaki",
+                "harici risk", "harici limit", "harici teminat",
+                "dış risk", "istihbarat",
+                "bankacılık risk", "sektör riski",
+            ],
+            "patterns": [
+                r'\w+\s+bankası',
+            ],
+            "boost_score": 0.30,
+        },
+        # P50: General risk / limit / teminat → Teklif Özeti
+        {
+            "rule_id": "TEKLIF_OZETI",
+            "rule_name": "Genel Risk/Limit/Teminat",
+            "priority": 50,
+            "doc_type": "Teklif Özeti",
+            "keywords": [
+                "genel risk", "toplam risk", "grubun riski", "grubun risk",
+                "nakdi risk", "nakdi riski", "nakit risk", "nakit riski",
+                "gayrinakdi risk", "gayrinakdi riski", "gayri nakdi risk", "gayri nakdi riski",
+                "gayrinakdi", "gayri nakdi",
+                "nakdi limit", "nakdi limiti", "gayrinakdi limit", "gayrinakdi limiti",
+                "grubun nakdi", "grubun gayrinakdi", "nakdi ve gayrinakdi",
+                "risk tablosu", "risk nedir", "riski nedir", "risk durumu",
+                "riski ne kadar", "risk ne kadar", "ne kadar risk",
+                "mevcut risk", "güncel risk", "risk yapısı", "kredi riski",
+                "limit bilgi", "limit nedir", "limiti nedir", "limiti ne kadar",
+                "limit türü", "limit türleri", "limit yapısı",
+                "teminat koşul", "teminat koşulları", "teminat şart", "teminat şartları",
+                "teminat nedir", "teminat yapısı", "teminata bağlı",
+                "tahsis edil", "tahsis edilecek", "tahsis edilen",
+                "önerilen limit", "önerilen risk", "önerilen teminat",
+                "teklif edilen", "teklif edilen limit", "teklif edilen risk",
+                "rating", "kefil", "kefalet", "kefiller", "ortaklık yapı",
+                "teklif", "komite", "şube teklif", "kredi müdürlüğü",
+                "teklif özet", "kredi teklif", "kredi tahsis",
+            ],
+            "patterns": [],
+            "boost_score": 0.35,
+        },
+        # P40: Mali veriler → Mali Veri Tabloları
+        {
+            "rule_id": "MALI_VERI",
+            "rule_name": "Mali Veriler",
+            "priority": 40,
+            "doc_type": "Mali Veri Tabloları",
+            "keywords": [
+                "net satış", "aktif toplam", "özkaynak", "bilanço", "bilançe",
+                "gelir tablosu", "mali oran", "kısa vadeli", "uzun vadeli",
+                "dönen varlık", "duran varlık", "brüt kar", "faaliyet karı",
+                "esas faaliyet", "amortisman", "finansman gideri",
+                "mali veri", "finansal tablo",
+            ],
+            "patterns": [],
+            "boost_score": 0.25,
+        },
+        # P40: Performans → Performans Değerlendirmesi
+        {
+            "rule_id": "PERFORMANS",
+            "rule_name": "Performans Değerlendirmesi",
+            "priority": 40,
+            "doc_type": "Performans Değerlendirmesi",
+            "keywords": [
+                "performans", "iş hacmi", "karlılık", "verimlilik", "büyüme oranı",
+            ],
+            "patterns": [],
+            "boost_score": 0.25,
+        },
     ]
 
-    def _detect_query_intent(self, query: str) -> Optional[str]:
+    def _detect_query_intent(self, query: str) -> Optional[Dict]:
         """
-        Sorgu metninden tercih edilen doküman türünü belirle.
-        Returns: Tercih edilen doküman türü veya None
+        Priority-ordered deterministic intent detection.
+        Rules are pre-sorted by priority (desc); first match wins.
+
+        Returns:
+            Dict with doc_type, matched_rule_id, matched_rule_name,
+            matched_keywords, rule_priority, boost_score.
+            None if no rule matches.
         """
         q_lower = query.lower()
-        for keywords, doc_type, _ in self.QUERY_INTENT_RULES:
-            for kw in keywords:
+
+        for rule in self.ROUTING_RULES:
+            matched = []
+
+            for kw in rule["keywords"]:
                 if kw in q_lower:
-                    logger.info(f"🎯 Sorgu niyeti tespit edildi: '{kw}' → {doc_type}")
-                    return doc_type
+                    matched.append(kw)
+
+            for pat in rule.get("patterns", []):
+                m = re.search(pat, q_lower)
+                if m:
+                    matched.append(f"pattern:{m.group()}")
+
+            if matched:
+                result = {
+                    "doc_type": rule["doc_type"],
+                    "matched_rule_id": rule["rule_id"],
+                    "matched_rule_name": rule["rule_name"],
+                    "matched_keywords": matched,
+                    "rule_priority": rule["priority"],
+                    "boost_score": rule["boost_score"],
+                }
+                logger.info(
+                    f"🎯 Routing: rule={rule['rule_id']} (P{rule['priority']}) → "
+                    f"{rule['doc_type']} | matched={matched[:5]}"
+                )
+                return result
+
         return None
 
     def _get_boost_for_type(self, doc_type: str) -> float:
         """Doküman türü için boost değerini getir."""
-        for _, dtype, boost in self.QUERY_INTENT_RULES:
-            if dtype == doc_type:
-                return boost
+        for rule in self.ROUTING_RULES:
+            if rule["doc_type"] == doc_type:
+                return rule["boost_score"]
         return 0.0
 
     # Rekabet eden doküman türleri — tercih edilen tür seçildiğinde,
@@ -426,8 +501,8 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         Returns:
             (reranked_docs, debug_info_dict)
         """
-        raw_preferred = self._detect_query_intent(query_text)
-        preferred_type = self._normalize_doc_type(raw_preferred) if raw_preferred else None
+        routing = self._detect_query_intent(query_text)
+        preferred_type = self._normalize_doc_type(routing["doc_type"]) if routing else None
         candidate_k = top_k * 6
 
         debug: Dict = {
@@ -435,6 +510,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             "retrieval_mode": "GLOBAL",
             "filtered_count": 0,
             "top3_chunks": [],
+            "routing_decision": routing,
         }
 
         if not preferred_type:
@@ -525,7 +601,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         Hardcoded bölüm kuralı kullanmaz — tüm sorgular için genel çalışır.
 
         Sinyaller:
-        1. Doküman türü boost/penalty (QUERY_INTENT_RULES — üst düzey)
+        1. Doküman türü boost/penalty (ROUTING_RULES — üst düzey)
         2. Genel içerik skoru (sayısallık, tablo, kelime örtüşmesi — otomatik)
         3. Sözlük kaynaklı bölüm başlığı boost (varsa — dict_headers)
         4. Çeşitlilik: tercih edilen türden %75
@@ -533,7 +609,8 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         if not documents:
             return documents
 
-        preferred_type = self._detect_query_intent(query)
+        routing = self._detect_query_intent(query)
+        preferred_type = routing["doc_type"] if routing else None
 
         if not preferred_type:
             # Niyet tespit edilemedi → sadece genel içerik sinyali + sözlük boost
