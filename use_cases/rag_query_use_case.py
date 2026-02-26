@@ -353,8 +353,30 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
 
         return best
 
+    # Canonical doc_type enum — maps any lowercase/trimmed variant to proper form
+    DOC_TYPE_ENUM: Dict[str, str] = {
+        "teklif özeti": "Teklif Özeti",
+        "teklif ozeti": "Teklif Özeti",
+        "istihbarat raporu": "İstihbarat Raporu",
+        "istihbarat": "İstihbarat Raporu",
+        "performans değerlendirmesi": "Performans Değerlendirmesi",
+        "performans degerlendirmesi": "Performans Değerlendirmesi",
+        "mali veri tabloları": "Mali Veri Tabloları",
+        "mali veri tablolari": "Mali Veri Tabloları",
+        "genel doküman": "Genel Doküman",
+        "genel dokuman": "Genel Doküman",
+    }
+
+    @classmethod
+    def _normalize_doc_type(cls, raw: str) -> str:
+        """Normalize doc_type: trim + lowercase → canonical enum value."""
+        if not raw:
+            return "Genel Doküman"
+        key = raw.strip().lower()
+        return cls.DOC_TYPE_ENUM.get(key, raw.strip())
+
     def _resolve_doc_type(self, doc) -> str:
-        """Chunk'ın doküman türünü metadata, içerik veya dosya adından tespit et."""
+        """Chunk'ın doküman türünü metadata, içerik veya dosya adından tespit et ve normalize et."""
         doc_type = ""
         if hasattr(doc, 'metadata') and doc.metadata:
             doc_type = doc.metadata.get('doc_type', '')
@@ -364,7 +386,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 doc_type = m.group(1).strip()
         if not doc_type and doc.filename:
             doc_type = self._detect_type_from_filename(doc.filename)
-        return doc_type or "Genel Doküman"
+        return self._normalize_doc_type(doc_type)
 
     @staticmethod
     def _detect_type_from_filename(filename: str) -> str:
@@ -381,11 +403,8 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         return ""
 
     # ================================================================
-    # DOCUMENT-TYPE-AWARE RETRIEVAL WITH GLOBAL FALLBACK
+    # DOCUMENT-TYPE-AWARE STRICT RETRIEVAL
     # ================================================================
-
-    FILTERED_MIN_CHUNKS = 2
-    FILTERED_MIN_SIMILARITY = 0.30
 
     async def _retrieve_documents(
         self,
@@ -393,37 +412,46 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         query_text: str,
         top_k: int,
         dict_headers: List[str]
-    ) -> Tuple[list, str]:
+    ) -> Tuple[list, Dict]:
         """
-        Document-type-aware filtered retrieval with global fallback.
+        Document-type-aware strict filtered retrieval.
 
         Strategy:
-        1. If preferred_type detected → filtered retrieval by doc_type
-        2. Evaluate sufficiency (min chunks & min similarity)
-        3. If insufficient → fallback to global, merge results
-        4. If no preferred_type → global retrieval (current behavior)
-        5. Always re-rank final candidates
+        - If preferred_type detected:
+            1. Run filtered search by doc_type (normalized)
+            2. filtered_count >= 1 → STRICT_FILTERED: use ONLY filtered, no global
+            3. filtered_count == 0 → FILTERED_FALLBACK: run global as last resort
+        - If no preferred_type → GLOBAL (current behavior)
 
         Returns:
-            (reranked_docs, retrieval_mode)  where mode is FILTERED/FALLBACK/GLOBAL
+            (reranked_docs, debug_info_dict)
         """
-        preferred_type = self._detect_query_intent(query_text)
+        raw_preferred = self._detect_query_intent(query_text)
+        preferred_type = self._normalize_doc_type(raw_preferred) if raw_preferred else None
         candidate_k = top_k * 6
 
+        debug: Dict = {
+            "preferred_type": preferred_type,
+            "retrieval_mode": "GLOBAL",
+            "filtered_count": 0,
+            "top3_chunks": [],
+        }
+
         if not preferred_type:
+            # No intent → global retrieval
             search_result = await self.document_repository.search_similar(
                 embedding=query_embedding,
                 top_k=candidate_k,
                 threshold=0.0
             )
             candidates = search_result.documents
-            retrieval_mode = "GLOBAL"
+            debug["retrieval_mode"] = "GLOBAL"
             logger.info(
                 f"📊 Retrieval mode=GLOBAL | no preferred_type | "
                 f"candidates={len(candidates)}"
             )
         else:
-            # Phase 1: Filtered retrieval by doc_type
+            # Filtered retrieval by normalized doc_type
             try:
                 filtered_result = await self.document_repository.search_similar_filtered(
                     embedding=query_embedding,
@@ -436,97 +464,59 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 filtered_docs = []
 
             filtered_count = len(filtered_docs)
-            top_sim = (
-                getattr(filtered_docs[0], 'similarity_score', 0)
-                if filtered_docs else 0.0
-            )
+            debug["filtered_count"] = filtered_count
 
-            needs_fallback = (
-                filtered_count < self.FILTERED_MIN_CHUNKS
-                or top_sim < self.FILTERED_MIN_SIMILARITY
-            )
-
-            if not needs_fallback:
+            if filtered_count >= 1:
+                # STRICT: use ONLY filtered results — no global mixing
                 candidates = filtered_docs
-                retrieval_mode = "FILTERED"
+                debug["retrieval_mode"] = "STRICT_FILTERED"
+                top_sim = getattr(filtered_docs[0], 'similarity_score', 0)
                 logger.info(
-                    f"📊 Retrieval mode=FILTERED | preferred_type={preferred_type} | "
+                    f"📊 Retrieval mode=STRICT_FILTERED | "
+                    f"preferred_type={preferred_type} | "
                     f"filtered_count={filtered_count} | top_sim={top_sim:.3f}"
                 )
             else:
-                # Phase 2: Fallback — global retrieval
+                # filtered_count == 0 → fallback to global
                 global_result = await self.document_repository.search_similar(
                     embedding=query_embedding,
                     top_k=candidate_k,
                     threshold=0.0
                 )
-                global_docs = global_result.documents
-
-                if filtered_docs:
-                    candidates = self._merge_retrieval_results(
-                        filtered_docs, global_docs, candidate_k
-                    )
-                    retrieval_mode = "FALLBACK"
-                    logger.info(
-                        f"📊 Retrieval mode=FALLBACK | preferred_type={preferred_type} | "
-                        f"filtered_count={filtered_count} | top_sim={top_sim:.3f} | "
-                        f"global_count={len(global_docs)} | merged={len(candidates)}"
-                    )
-                else:
-                    candidates = global_docs
-                    retrieval_mode = "GLOBAL"
-                    logger.info(
-                        f"📊 Retrieval mode=GLOBAL (filtered empty) | "
-                        f"preferred_type={preferred_type} | global_count={len(global_docs)}"
-                    )
+                candidates = global_result.documents
+                debug["retrieval_mode"] = "FILTERED_FALLBACK"
+                logger.info(
+                    f"📊 Retrieval mode=FILTERED_FALLBACK | "
+                    f"preferred_type={preferred_type} | "
+                    f"filtered_count=0 | global_count={len(candidates)}"
+                )
 
         if not candidates:
-            return [], retrieval_mode
+            return [], debug
 
-        # Re-rank all candidates through existing pipeline
+        # Re-rank candidates through existing pipeline
         reranked = self._rerank_chunks(
             candidates, query_text, top_k, dict_headers=dict_headers
         )
 
-        # Log top 3 selected chunks
+        # Build top3_chunks debug info
+        top3 = []
         for i, doc in enumerate(reranked[:3]):
             doc_type = self._resolve_doc_type(doc)
             sim = getattr(doc, 'similarity_score', 0)
+            top3.append({
+                "rank": i + 1,
+                "filename": doc.filename,
+                "doc_type": doc_type,
+                "similarity_score": round(sim, 4),
+            })
             logger.info(
                 f"📊 Selected Top-{i+1}: {doc.filename} | "
                 f"doc_type={doc_type} | sim={sim:.3f}"
             )
+        debug["top3_chunks"] = top3
 
-        return reranked, retrieval_mode
-
-    @staticmethod
-    def _merge_retrieval_results(
-        filtered_docs: list,
-        global_docs: list,
-        max_count: int
-    ) -> list:
-        """
-        Merge filtered and global results with deduplication.
-        Filtered results take priority; global fills remaining slots.
-        """
-        seen = set()
-        merged = []
-
-        for doc in filtered_docs:
-            key = (doc.filename, doc.chunk_index)
-            if key not in seen:
-                seen.add(key)
-                merged.append(doc)
-
-        for doc in global_docs:
-            if len(merged) >= max_count:
-                break
-            key = (doc.filename, doc.chunk_index)
-            if key not in seen:
-                seen.add(key)
-                merged.append(doc)
-
-        return merged[:max_count]
+        return reranked, debug
 
     def _rerank_chunks(self, documents: list, query: str, final_k: int,
                        dict_headers: List[str] = None) -> list:
@@ -643,9 +633,9 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             if enhanced_query != query.query:
                 query_embedding = await self.embedding_service.embed_text(enhanced_query)
 
-            # Step 2: Document-type-aware retrieval with fallback
+            # Step 2: Document-type-aware strict retrieval
             logger.info(f"🔎 Retrieving documents (final_k={query.top_k})...")
-            reranked_docs, retrieval_mode = await self._retrieve_documents(
+            reranked_docs, debug_info = await self._retrieve_documents(
                 query_embedding=query_embedding,
                 query_text=query.query,
                 top_k=query.top_k,
@@ -660,8 +650,11 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     sources=[],
                     model=await self.llm_service.get_model_name(),
                     timestamp=datetime.utcnow(),
-                    user_id=query.user_id
+                    user_id=query.user_id,
+                    debug_info=debug_info
                 )
+
+            retrieval_mode = debug_info["retrieval_mode"]
 
             # Step 3: Kontekst oluştur + Kaynak izle (source tracking)
             logger.info(f"📝 Building context from {len(reranked_docs)} chunks (retrieval={retrieval_mode})...")
@@ -728,14 +721,15 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
 
             logger.info(f"✅ Advanced RAG query successful [User: {query.user_id}]")
 
-            # Yanıt döndür (source tracking ile)
+            # Yanıt döndür (source tracking + debug_info ile)
             return RAGResponse(
                 question=query.query,
                 answer=answer.strip(),
                 sources=sources_with_metadata,
                 model=await self.llm_service.get_model_name(),
                 timestamp=datetime.utcnow(),
-                user_id=query.user_id
+                user_id=query.user_id,
+                debug_info=debug_info
             )
 
         except Exception as e:
@@ -768,9 +762,9 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             if enhanced_query != query.query:
                 query_embedding = await self.embedding_service.embed_text(enhanced_query)
 
-            # Step 2: Document-type-aware retrieval with fallback
+            # Step 2: Document-type-aware strict retrieval
             logger.info(f"🔎 Retrieving documents (final_k={query.top_k})...")
-            reranked_docs, retrieval_mode = await self._retrieve_documents(
+            reranked_docs, debug_info = await self._retrieve_documents(
                 query_embedding=query_embedding,
                 query_text=query.query,
                 top_k=query.top_k,
@@ -781,6 +775,8 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                 logger.warning("⚠️ No similar documents found for stream")
                 yield "Sorgunuzla ilgili döküman bulunamadı."
                 return
+
+            retrieval_mode = debug_info["retrieval_mode"]
 
             # Step 3: Kontekst oluştur + Kaynak izle
             logger.info(f"📝 Building context from {len(reranked_docs)} chunks (retrieval={retrieval_mode})...")
