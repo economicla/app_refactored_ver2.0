@@ -34,6 +34,11 @@ from app_refactored.core.entities import (
 from .document_preprocessing import DocumentPreprocessor
 from .intelligent_chunking import IntelligentChunker
 from .html_structured_converter import HTMLStructuredConverter
+
+from app_refactored.structured_extractors import CreditIntelligencePDFExtractor
+from app_refactored.structured_extractors.credit_intelligence_pdf_extractor import (
+    render_structured_text,
+)
  
 logger = logging.getLogger(__name__)
  
@@ -95,9 +100,14 @@ class DocumentIngestionUseCase:
 
         file_type = path.suffix.lower()
  
+        self._structured_json = None
+
         try:
 
             if file_type == '.pdf':
+                if self._is_credit_intelligence_pdf(file_path, Path(file_path).name):
+                    logger.info("📑 İstihbarat Raporu detected → structured extraction")
+                    return self._extract_pdf_structured(file_path)
 
                 return self._extract_pdf(file_path)
 
@@ -130,6 +140,48 @@ class DocumentIngestionUseCase:
 
             raise
  
+    def _is_credit_intelligence_pdf(self, file_path: str, filename: str) -> bool:
+        """Detect whether this PDF is a Kredi İstihbarat Raporu."""
+        fname = filename.lower()
+        if "istihbarat" in fname:
+            return True
+
+        try:
+            import pdfplumber
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages[:3]:
+                    text = (page.extract_text() or "").lower()
+                    signals = ("banka istihbarat", "memzuç bilgi", "memzuc bilgi",
+                               "limit risk bilgi", "kredi istihbarat")
+                    if sum(1 for s in signals if s in text) >= 2:
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _extract_pdf_structured(self, file_path: str) -> str:
+        """
+        Structured extraction for İstihbarat Raporu PDFs.
+        Returns controlled text via render_structured_text().
+        Also stores the raw JSON in self._structured_json for metadata use.
+        """
+        extractor = CreditIntelligencePDFExtractor()
+        data = extractor.extract(file_path)
+        self._structured_json = data
+
+        warnings = data.get("debug", {}).get("warnings", [])
+        if warnings:
+            for w in warnings[:10]:
+                logger.warning(f"⚠️ Structured PDF: {w}")
+
+        text = render_structured_text(data)
+        logger.info(
+            f"✅ Structured PDF extraction: {len(text)} chars, "
+            f"{data['meta']['pages']} pages, "
+            f"{len(data.get('debug', {}).get('section_hits', []))} sections detected"
+        )
+        return text
+
     def _extract_pdf(self, file_path: str) -> str:
 
         """PDF'den metin çıkart - pdfplumber (tablo destekli) + PyMuPDF fallback"""
