@@ -138,6 +138,44 @@ class IDocumentRepository(ABC):
 
     @abstractmethod
 
+    async def search_similar_filtered(
+
+        self,
+
+        embedding: List[float],
+
+        document_id: Optional[str] = None,
+
+        doc_type: Optional[str] = None,
+
+        top_k: int = 5
+
+    ) -> SearchResult:
+
+        """
+
+        Filtered vector search — belirli bir doküman veya doküman türüne göre ara.
+
+        Args:
+
+            embedding: Arama embedding'i
+
+            document_id: Opsiyonel dosya adı filtresi
+
+            doc_type: Opsiyonel doküman türü filtresi (metadata doc_type)
+
+            top_k: Döndürülecek en iyi k sonuç
+
+        Returns:
+
+            SearchResult: Filtrelenmiş benzer dokümanlar
+
+        """
+
+        pass
+
+    @abstractmethod
+
     async def get_by_filename(self, filename: str) -> List[DocumentChunk]:
 
         """
