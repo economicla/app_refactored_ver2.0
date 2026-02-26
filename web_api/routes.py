@@ -794,48 +794,58 @@ async def debug_query(
     container: DIContainer = Depends(get_di_container)
 ):
     """
-    DEBUG: RAG sorgusunun LLM'e gönderilmeden önceki halini gösterir.
-    - Retrieve edilen chunk'ların tam içeriğini
-    - Oluşturulan prompt'u
-    - Embedding ve similarity score bilgilerini gösterir.
+    DEBUG: Yeni strict filtered retrieval pipeline'ını kullanır.
+    - debug_info: preferred_type, retrieval_mode, filtered_count, top3_chunks
+    - Retrieve + rerank edilen chunk'ların tam içeriğini
+    - Oluşturulan prompt'u gösterir.
     LLM çağrısı YAPMAZ.
     """
     try:
         logger.info(f"🔍 DEBUG Query: {request.query[:80]}")
 
-        # Embedding
-        embedding_svc = container.get_embedding_service()
-        query_embedding = await embedding_svc.embed_text(request.query)
+        rag_use_case = container.get_rag_query_use_case()
 
-        # Search
-        doc_repo = container.get_document_repository()
-        search_result = await doc_repo.search_similar(
-            embedding=query_embedding,
+        # Step 1: Embedding
+        query_embedding = await rag_use_case.embedding_service.embed_text(request.query)
+
+        # Step 1.5: Sözlük-destekli sorgu genişletme
+        enhanced_query, dict_headers = await rag_use_case._enhance_query_with_dictionary(
+            request.query, query_embedding
+        )
+        if enhanced_query != request.query:
+            query_embedding = await rag_use_case.embedding_service.embed_text(enhanced_query)
+
+        # Step 2: Strict filtered retrieval + rerank (LLM'siz)
+        reranked_docs, debug_info = await rag_use_case._retrieve_documents(
+            query_embedding=query_embedding,
+            query_text=request.query,
             top_k=request.top_k,
-            threshold=0.0
+            dict_headers=dict_headers
         )
 
-        # Build context (same logic as RAGQueryUseCase)
+        # Build context + chunks detail
         context_parts = []
         chunks_detail = []
-        for idx, doc in enumerate(search_result.documents):
+        for idx, doc in enumerate(reranked_docs):
             header = doc.metadata.get('header') if hasattr(doc, 'metadata') and doc.metadata else None
+            doc_type = rag_use_case._resolve_doc_type(doc)
             header_text = f" [{header}]" if header else ""
             context_parts.append(
-                f"[Kaynak {idx+1}: {doc.filename}{header_text}]\n{doc.content}"
+                f"[Kaynak {idx+1}: {doc.filename}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
             )
             chunks_detail.append({
                 "index": idx,
                 "filename": doc.filename,
                 "chunk_index": doc.chunk_index,
                 "header": header,
-                "similarity_score": getattr(doc, 'similarity_score', 0),
+                "doc_type": doc_type,
+                "similarity_score": round(getattr(doc, 'similarity_score', 0), 4),
                 "content_length": len(doc.content),
                 "full_content": doc.content
             })
 
         context = "\n\n---\n\n".join(context_parts)
-        prompt = f"""KONTEXT (Yalnızca aşağıdaki bilgiyi kullan):
+        prompt = f"""KONTEXT (Aşağıdaki finansal verileri dikkatlice oku ve soruyu cevapla):
 {context}
 
 SORU: {request.query}
@@ -844,7 +854,9 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
 
         return {
             "query": request.query,
-            "chunks_retrieved": len(search_result.documents),
+            "enhanced_query": enhanced_query if enhanced_query != request.query else None,
+            "debug_info": debug_info,
+            "chunks_retrieved": len(reranked_docs),
             "chunks_detail": chunks_detail,
             "full_prompt_length": len(prompt),
             "full_prompt": prompt
