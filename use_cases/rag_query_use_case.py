@@ -512,24 +512,46 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         raw = re.findall(r'[a-züöçşığA-ZÜÖÇŞİĞ]{2,}', name.lower())
         return {t for t in raw if t not in cls._BANK_NAME_STOP_WORDS}
 
+    _BANKA_SECTION_RE = re.compile(
+        r'##\s*Banka\s+[İi]stihbarat[ıi]', re.IGNORECASE
+    )
+    _BANKA_LINE_RE = re.compile(
+        r'^Banka:\s*(.+?)(?:\s*\|)', re.MULTILINE
+    )
+
     def _extract_bank_index_from_chunks(self, chunks: list) -> List[str]:
         """
-        Scan İstihbarat Raporu chunks for official bank names.
-        Uses regex to find "... Bankası A.Ş." patterns in chunk content.
-        Returns deduplicated list of official bank names.
+        Build bank index from the structured extractor's rendered text.
+
+        Looks for the ``## Banka İstihbaratı`` heading inside chunks,
+        then extracts official bank names from ``Banka: <name> |`` lines
+        underneath.  Falls back to regex scan if no structured section found.
         """
         seen: set = set()
         bank_names: List[str] = []
 
         for doc in chunks:
             content = getattr(doc, 'content', '')
-            for m in self._OFFICIAL_BANK_RE.finditer(content):
+            if not self._BANKA_SECTION_RE.search(content):
+                continue
+            for m in self._BANKA_LINE_RE.finditer(content):
                 raw = m.group(1).strip().rstrip('.')
-                if len(raw) > 5:
+                if len(raw) > 4:
                     key = raw.lower()
                     if key not in seen:
                         seen.add(key)
                         bank_names.append(raw)
+
+        if not bank_names:
+            for doc in chunks:
+                content = getattr(doc, 'content', '')
+                for m in self._OFFICIAL_BANK_RE.finditer(content):
+                    raw = m.group(1).strip().rstrip('.')
+                    if len(raw) > 5:
+                        key = raw.lower()
+                        if key not in seen:
+                            seen.add(key)
+                            bank_names.append(raw)
 
         logger.info(f"🏦 Bank index: {len(bank_names)} names from {len(chunks)} chunks")
         for name in bank_names[:10]:
@@ -692,15 +714,20 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         reranked_docs: list,
     ) -> Dict:
         """
-        Bank-scope grounding guardrail.
+        Bank-scope grounding guardrail — 3-tier scoping strategy.
 
-        - If normalized_bank_name is null or confidence < threshold → block.
-        - Otherwise verify that at least one reranked chunk actually contains
-          the official bank name; if yes, scope to only those chunks.
+        Tier 1 — ``substring_scoped``:
+            Bank name substring found in chunks → use only those chunks.
+        Tier 2 — ``fallback_banka_istihbarati_only``:
+            Bank name not found, but chunks with "Banka İstihbaratı" header
+            exist → use only those (LLM still runs, but with narrower context).
+        Tier 3 — ``blocked``:
+            No resolution or no relevant chunks at all → safe_answer, no LLM.
         """
         norm_name = bank_resolution.get("normalized_bank_name")
         confidence = bank_resolution.get("match_confidence", "none")
 
+        # Gate: confidence too low → blocked
         if not norm_name or confidence not in self.BANK_GUARDRAIL_CONFIDENCE_THRESHOLD:
             logger.info(
                 f"🛡️ Bank guardrail BLOCKED: norm={norm_name}, "
@@ -709,11 +736,13 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             return {
                 "passed": False,
                 "reason": "bank_not_resolved",
+                "scoping_strategy": "blocked",
                 "safe_answer": self.BANK_NOT_FOUND_ANSWER,
                 "bank_scoped_chunks_used": [],
                 "scoped_count": 0,
             }
 
+        # Tier 1: substring match on the bank name
         search_key = self._bank_search_key(norm_name)
         scoped: list = []
         scoped_info: List[Dict] = []
@@ -729,25 +758,59 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
 
         if scoped:
             logger.info(
-                f"🛡️ Bank guardrail PASSED: '{norm_name}' (key='{search_key}') "
+                f"🛡️ Bank guardrail PASSED (substring_scoped): "
+                f"'{norm_name}' (key='{search_key}') "
                 f"found in {len(scoped)}/{len(reranked_docs)} chunks"
             )
             return {
                 "passed": True,
                 "reason": "ok",
+                "scoping_strategy": "substring_scoped",
                 "safe_answer": None,
                 "bank_scoped_chunks_used": scoped_info,
                 "scoped_count": len(scoped),
                 "scoped_docs": scoped,
             }
 
+        # Tier 2: fall back to chunks that contain "Banka İstihbaratı" header
+        banka_section_docs: list = []
+        banka_section_info: List[Dict] = []
+
+        for doc in reranked_docs:
+            content = getattr(doc, 'content', '')
+            if self._BANKA_SECTION_RE.search(content) or \
+               'banka istihbarat' in content.lower().replace('İ', 'i').replace('ı', 'i'):
+                banka_section_docs.append(doc)
+                banka_section_info.append({
+                    "filename": doc.filename,
+                    "chunk_index": getattr(doc, 'chunk_index', None),
+                })
+
+        if banka_section_docs:
+            logger.info(
+                f"🛡️ Bank guardrail PASSED (fallback_banka_istihbarati_only): "
+                f"'{norm_name}' not in text, but {len(banka_section_docs)} "
+                f"'Banka İstihbaratı' chunks available"
+            )
+            return {
+                "passed": True,
+                "reason": "bank_not_in_text_but_section_available",
+                "scoping_strategy": "fallback_banka_istihbarati_only",
+                "safe_answer": None,
+                "bank_scoped_chunks_used": banka_section_info,
+                "scoped_count": len(banka_section_docs),
+                "scoped_docs": banka_section_docs,
+            }
+
+        # Tier 3: nothing found → blocked
         logger.info(
-            f"🛡️ Bank guardrail FAILED: '{norm_name}' (key='{search_key}') "
-            f"not found in any of {len(reranked_docs)} chunks"
+            f"🛡️ Bank guardrail BLOCKED: '{norm_name}' (key='{search_key}') "
+            f"not found, no Banka İstihbaratı chunks either"
         )
         return {
             "passed": False,
             "reason": "bank_not_in_context",
+            "scoping_strategy": "blocked",
             "safe_answer": self.BANK_NO_DATA_ANSWER_TEMPLATE.format(bank_name=norm_name),
             "bank_scoped_chunks_used": [],
             "scoped_count": 0,
@@ -903,10 +966,9 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             return documents
 
         routing = self._detect_query_intent(query)
-        preferred_type = routing["doc_type"] if routing else None
+        preferred_type = self._normalize_doc_type(routing["doc_type"]) if routing else None
 
         if not preferred_type:
-            # Niyet tespit edilemedi → sadece genel içerik sinyali + sözlük boost
             scored_docs = []
             for doc in documents:
                 sim = getattr(doc, 'similarity_score', 0)
