@@ -124,11 +124,24 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
 
         # Genel risk, limit, teminat → Teklif Özeti (öncelikli, genel risk sorguları)
         (["genel risk", "toplam risk", "grubun riski", "grubun risk",
+          "nakdi risk", "nakdi riski", "nakit risk", "nakit riski",
+          "gayrinakdi risk", "gayrinakdi riski", "gayri nakdi risk", "gayri nakdi riski",
+          "gayrinakdi", "gayri nakdi",
+          "nakdi limit", "nakdi limiti", "gayrinakdi limit", "gayrinakdi limiti",
+          "grubun nakdi", "grubun gayrinakdi", "nakdi ve gayrinakdi",
           "risk tablosu", "risk nedir", "riski nedir", "risk durumu",
+          "riski ne kadar", "risk ne kadar", "ne kadar risk",
           "mevcut risk", "güncel risk", "risk yapısı", "kredi riski",
-          "limit bilgi", "limit nedir", "teminat koşul", "teminat nedir",
-          "rating", "kefil", "ortaklık yapı",
-          "teklif", "komite", "şube teklif", "kredi müdürlüğü"],
+          "limit bilgi", "limit nedir", "limiti nedir", "limiti ne kadar",
+          "limit türü", "limit türleri", "limit yapısı",
+          "teminat koşul", "teminat koşulları", "teminat şart", "teminat şartları",
+          "teminat nedir", "teminat yapısı", "teminata bağlı",
+          "tahsis edil", "tahsis edilecek", "tahsis edilen",
+          "önerilen limit", "önerilen risk", "önerilen teminat",
+          "teklif edilen", "teklif edilen limit", "teklif edilen risk",
+          "rating", "kefil", "kefalet", "kefiller", "ortaklık yapı",
+          "teklif", "komite", "şube teklif", "kredi müdürlüğü",
+          "teklif özet", "kredi teklif", "kredi tahsis"],
          "Teklif Özeti", 0.35),
 
         # Mali veriler → Mali Veri Tabloları
