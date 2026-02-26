@@ -380,6 +380,154 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             return "Mali Veri Tabloları"
         return ""
 
+    # ================================================================
+    # DOCUMENT-TYPE-AWARE RETRIEVAL WITH GLOBAL FALLBACK
+    # ================================================================
+
+    FILTERED_MIN_CHUNKS = 2
+    FILTERED_MIN_SIMILARITY = 0.30
+
+    async def _retrieve_documents(
+        self,
+        query_embedding: List[float],
+        query_text: str,
+        top_k: int,
+        dict_headers: List[str]
+    ) -> Tuple[list, str]:
+        """
+        Document-type-aware filtered retrieval with global fallback.
+
+        Strategy:
+        1. If preferred_type detected → filtered retrieval by doc_type
+        2. Evaluate sufficiency (min chunks & min similarity)
+        3. If insufficient → fallback to global, merge results
+        4. If no preferred_type → global retrieval (current behavior)
+        5. Always re-rank final candidates
+
+        Returns:
+            (reranked_docs, retrieval_mode)  where mode is FILTERED/FALLBACK/GLOBAL
+        """
+        preferred_type = self._detect_query_intent(query_text)
+        candidate_k = top_k * 6
+
+        if not preferred_type:
+            search_result = await self.document_repository.search_similar(
+                embedding=query_embedding,
+                top_k=candidate_k,
+                threshold=0.0
+            )
+            candidates = search_result.documents
+            retrieval_mode = "GLOBAL"
+            logger.info(
+                f"📊 Retrieval mode=GLOBAL | no preferred_type | "
+                f"candidates={len(candidates)}"
+            )
+        else:
+            # Phase 1: Filtered retrieval by doc_type
+            try:
+                filtered_result = await self.document_repository.search_similar_filtered(
+                    embedding=query_embedding,
+                    doc_type=preferred_type,
+                    top_k=candidate_k
+                )
+                filtered_docs = filtered_result.documents
+            except Exception as e:
+                logger.warning(f"⚠️ Filtered search failed, falling back to global: {e}")
+                filtered_docs = []
+
+            filtered_count = len(filtered_docs)
+            top_sim = (
+                getattr(filtered_docs[0], 'similarity_score', 0)
+                if filtered_docs else 0.0
+            )
+
+            needs_fallback = (
+                filtered_count < self.FILTERED_MIN_CHUNKS
+                or top_sim < self.FILTERED_MIN_SIMILARITY
+            )
+
+            if not needs_fallback:
+                candidates = filtered_docs
+                retrieval_mode = "FILTERED"
+                logger.info(
+                    f"📊 Retrieval mode=FILTERED | preferred_type={preferred_type} | "
+                    f"filtered_count={filtered_count} | top_sim={top_sim:.3f}"
+                )
+            else:
+                # Phase 2: Fallback — global retrieval
+                global_result = await self.document_repository.search_similar(
+                    embedding=query_embedding,
+                    top_k=candidate_k,
+                    threshold=0.0
+                )
+                global_docs = global_result.documents
+
+                if filtered_docs:
+                    candidates = self._merge_retrieval_results(
+                        filtered_docs, global_docs, candidate_k
+                    )
+                    retrieval_mode = "FALLBACK"
+                    logger.info(
+                        f"📊 Retrieval mode=FALLBACK | preferred_type={preferred_type} | "
+                        f"filtered_count={filtered_count} | top_sim={top_sim:.3f} | "
+                        f"global_count={len(global_docs)} | merged={len(candidates)}"
+                    )
+                else:
+                    candidates = global_docs
+                    retrieval_mode = "GLOBAL"
+                    logger.info(
+                        f"📊 Retrieval mode=GLOBAL (filtered empty) | "
+                        f"preferred_type={preferred_type} | global_count={len(global_docs)}"
+                    )
+
+        if not candidates:
+            return [], retrieval_mode
+
+        # Re-rank all candidates through existing pipeline
+        reranked = self._rerank_chunks(
+            candidates, query_text, top_k, dict_headers=dict_headers
+        )
+
+        # Log top 3 selected chunks
+        for i, doc in enumerate(reranked[:3]):
+            doc_type = self._resolve_doc_type(doc)
+            sim = getattr(doc, 'similarity_score', 0)
+            logger.info(
+                f"📊 Selected Top-{i+1}: {doc.filename} | "
+                f"doc_type={doc_type} | sim={sim:.3f}"
+            )
+
+        return reranked, retrieval_mode
+
+    @staticmethod
+    def _merge_retrieval_results(
+        filtered_docs: list,
+        global_docs: list,
+        max_count: int
+    ) -> list:
+        """
+        Merge filtered and global results with deduplication.
+        Filtered results take priority; global fills remaining slots.
+        """
+        seen = set()
+        merged = []
+
+        for doc in filtered_docs:
+            key = (doc.filename, doc.chunk_index)
+            if key not in seen:
+                seen.add(key)
+                merged.append(doc)
+
+        for doc in global_docs:
+            if len(merged) >= max_count:
+                break
+            key = (doc.filename, doc.chunk_index)
+            if key not in seen:
+                seen.add(key)
+                merged.append(doc)
+
+        return merged[:max_count]
+
     def _rerank_chunks(self, documents: list, query: str, final_k: int,
                        dict_headers: List[str] = None) -> list:
         """
@@ -495,17 +643,16 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             if enhanced_query != query.query:
                 query_embedding = await self.embedding_service.embed_text(enhanced_query)
 
-            # Step 2: Benzer dokümantasyonu ara (geniş aday havuzu)
-            candidate_k = query.top_k * 6
-            logger.info(f"🔎 Searching similar documents (candidate_k={candidate_k}, final_k={query.top_k})...")
-            search_result = await self.document_repository.search_similar(
-                embedding=query_embedding,
-                top_k=candidate_k,
-                threshold=0.0
+            # Step 2: Document-type-aware retrieval with fallback
+            logger.info(f"🔎 Retrieving documents (final_k={query.top_k})...")
+            reranked_docs, retrieval_mode = await self._retrieve_documents(
+                query_embedding=query_embedding,
+                query_text=query.query,
+                top_k=query.top_k,
+                dict_headers=dict_headers
             )
 
-            # Sonuç yoksa
-            if not search_result.documents:
+            if not reranked_docs:
                 logger.warning("⚠️ No similar documents found")
                 return RAGResponse(
                     question=query.query,
@@ -516,14 +663,8 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     user_id=query.user_id
                 )
 
-            # Step 2.5: Akıllı re-ranking (otomatik sinyaller + sözlük)
-            reranked_docs = self._rerank_chunks(
-                search_result.documents, query.query, query.top_k,
-                dict_headers=dict_headers
-            )
-
             # Step 3: Kontekst oluştur + Kaynak izle (source tracking)
-            logger.info(f"📝 Building context from {len(reranked_docs)} chunks...")
+            logger.info(f"📝 Building context from {len(reranked_docs)} chunks (retrieval={retrieval_mode})...")
             context_parts = []
             sources_with_metadata: List[SourceWithMetadata] = []
             
@@ -627,28 +768,22 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             if enhanced_query != query.query:
                 query_embedding = await self.embedding_service.embed_text(enhanced_query)
 
-            # Step 2: Benzer dokümantasyonu ara (geniş aday havuzu)
-            candidate_k = query.top_k * 6
-            logger.info(f"🔎 Searching similar documents (candidate_k={candidate_k}, final_k={query.top_k})...")
-            search_result = await self.document_repository.search_similar(
-                embedding=query_embedding,
-                top_k=candidate_k,
-                threshold=0.0
+            # Step 2: Document-type-aware retrieval with fallback
+            logger.info(f"🔎 Retrieving documents (final_k={query.top_k})...")
+            reranked_docs, retrieval_mode = await self._retrieve_documents(
+                query_embedding=query_embedding,
+                query_text=query.query,
+                top_k=query.top_k,
+                dict_headers=dict_headers
             )
 
-            if not search_result.documents:
+            if not reranked_docs:
                 logger.warning("⚠️ No similar documents found for stream")
                 yield "Sorgunuzla ilgili döküman bulunamadı."
                 return
 
-            # Step 2.5: Akıllı re-ranking (otomatik sinyaller + sözlük)
-            reranked_docs = self._rerank_chunks(
-                search_result.documents, query.query, query.top_k,
-                dict_headers=dict_headers
-            )
-
             # Step 3: Kontekst oluştur + Kaynak izle
-            logger.info(f"📝 Building context from {len(reranked_docs)} chunks...")
+            logger.info(f"📝 Building context from {len(reranked_docs)} chunks (retrieval={retrieval_mode})...")
             context_parts = []
             sources_with_metadata: List[SourceWithMetadata] = []
             
