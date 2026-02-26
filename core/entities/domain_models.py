@@ -75,6 +75,7 @@ class RAGResponse:
     timestamp: Optional[datetime] = None
 
     user_id: str = "anonymous"
+    debug_info: Optional[Dict] = field(default=None)
  
  
 @dataclass
