@@ -141,11 +141,21 @@ def _clean_cell(cell: Any) -> str:
     return str(cell).strip().replace('\n', ' ')
 
 
-def _normalize_bank_name(raw: str) -> str:
-    """Normalize whitespace, case artifacts, and trailing punctuation."""
-    name = re.sub(r'\s+', ' ', raw).strip()
-    name = name.rstrip('.')
-    return name
+def _normalize_bank_name(name: str) -> str:
+   if not name:
+       return ""
+   # newline ve tabları space yap
+   name = name.replace("\n", " ").replace("\t", " ")
+   # çoklu boşlukları teke indir
+   name = re.sub(r"\s+", " ", name)
+   # baş/son boşlukları sil
+   name = name.strip()
+   # son noktayı kaldır
+   name = name.rstrip(".")
+   # A.Ş varyasyonlarını normalize et
+   # (A.Ş., A.Ş, A.S., A S vb. gibi kirli varyasyonlar olabilir)
+   name = re.sub(r"\bA\s*\.?\s*Ş\.?\b", "A.Ş", name, flags=re.IGNORECASE)
+   return name
 
 
 def _detect_section(text: str) -> Optional[str]:
