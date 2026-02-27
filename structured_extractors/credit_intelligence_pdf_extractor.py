@@ -334,13 +334,13 @@ class CreditIntelligencePDFExtractor:
         for pd in pages:
             if pd.section_header:
                 current_section = pd.section_header
-                section_hits.append({
-                    "page": pd.page_num,
-                    "section": current_section,
-                })
-                logger.info(
-                    f"📑 Page {pd.page_num}: section '{current_section}' detected"
-                )
+
+            elif self._looks_like_banka_istihbarati(pd):
+                current_section = "banka_istihbarati"
+                section_hits.append({"page": pd.page_num, "section": current_section})
+                logger.info(f"📑 Page {pd.page_num}: banka override -> '{current_section}'")
+                assigned.setdefault(current_section, []).append(pd)
+                continue
             else:
                 if current_section:
                     spill_merges.append({
