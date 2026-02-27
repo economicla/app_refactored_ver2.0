@@ -787,7 +787,13 @@ def render_structured_text(data: Dict) -> str:
         parts.append("")
 
     # Banka İstihbaratı — line per bank
-    banka_list = sections.get("banka_istihbarati", [])
+    banka_list = (
+        sections.get("banka_istihbarati")
+        or sections.get("banka_istihbaratı")
+        or sections.get("bankaIstihbarati")
+        or sections.get("bank_istihbarati")
+        or []
+    )
     if banka_list:
         parts.append("## Banka İstihbaratı")
         for rec in banka_list:
