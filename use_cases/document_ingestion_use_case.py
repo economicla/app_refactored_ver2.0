@@ -550,7 +550,7 @@ class DocumentIngestionUseCase:
 
             logger.info(f"📄 Extracting text from {Path(filename).suffix}...")
 
-            text = self._extract_text(file_path)
+            text = self._extract_text(file_path, filename)
 
             original_length = len(text)
 
