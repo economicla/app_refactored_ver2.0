@@ -286,9 +286,9 @@ class CreditIntelligencePDFExtractor:
                 detected_header = sec
                 break
 
-        if detected_header is None:
-            for tbl in tables_raw:
-                for row in tbl[:3]:
+        if detected_header is None and tables_raw:
+            for tbl in tables_raw[:2]:
+                for row in tbl[:30]:
                     combined = ' '.join(row)
                     sec = _detect_section(combined)
                     if sec:
