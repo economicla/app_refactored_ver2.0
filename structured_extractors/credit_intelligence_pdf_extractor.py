@@ -547,6 +547,11 @@ class CreditIntelligencePDFExtractor:
         for pd in pages:
             if pd.page_num == expected_page:
                 text_lower = _tr_lower(pd.free_text)
+                # tablo metnini de ekle
+                for tbl in pd.tables[:3]:
+                    for row in tbl[:50]:
+                        text_lower += " " + _tr_lower(" ".join(row))
+                        
                 if search_key in text_lower:
                     return True
                 matched = sum(1 for t in search_tokens if t in text_lower)
