@@ -105,7 +105,7 @@ class DocumentIngestionUseCase:
         try:
 
             if file_type == '.pdf':
-                if self._is_credit_intelligence_pdf(file_path, Path(file_path).name):
+                if self._is_credit_intelligence_pdf(file_path, filename):
                     logger.info("📑 İstihbarat Raporu detected → structured extraction")
                     return self._extract_pdf_structured(file_path)
 
