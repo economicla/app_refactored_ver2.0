@@ -92,7 +92,7 @@ class DocumentIngestionUseCase:
 
         self.chunk_overlap = chunk_overlap
  
-    def _extract_text(self, file_path: str) -> str:
+    def _extract_text(self, file_path: str, filename: str) -> str:
 
         """Dosya türüne göre metni çıkart"""
 
