@@ -305,6 +305,16 @@ class CreditIntelligencePDFExtractor:
             table_count=len(tables_raw),
         )
 
+    def _looks_like_banka_istihbarati(self, pd: "_PageData") -> bool:
+        needles = ("genel limit", "nakit risk", "nakdi risk", "g.nakdi", "gayrinakdi", "teminat", "revize")
+        hay = _tr_lower(pd.free_text or "")
+        # tablo hücrelerini de ekle
+        for tbl in pd.tables[:3]:
+            for row in tbl[:50]:
+                hay += " " + _tr_lower(" ".join(row))
+        score = sum(1 for n in needles if n in hay)
+        return score >= 2
+    
     # ------------------------------------------------------- section assignment
 
     def _assign_sections(
