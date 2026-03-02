@@ -501,10 +501,19 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
 
     _QUERY_BANK_RE = re.compile(
         r'([A-ZÜÖÇŞİĞa-züöçşığ]+'
-        r'(?:\s+[A-ZÜÖÇŞİĞa-züöçşığ]+)*?)'
+        r'(?:\s+[A-ZÜÖÇŞİĞa-züöçşığ]+){0,3}?)'
         r"\s+(?:bankası|bankas[ıi]|bankası')",
         re.IGNORECASE | re.UNICODE
     )
+
+    _BANK_MENTION_NOISE_WORDS = frozenset({
+        "grubun", "grup", "firmanın", "firmanin", "firma",
+        "şirketin", "sirketin", "şirket", "sirket",
+        "müşterinin", "musterinin", "müşteri", "musteri",
+        "bizim", "onların", "onlarin", "bu", "şu", "o",
+        "tüm", "tum", "bütün", "butun", "herhangi",
+        "mevcut", "yeni", "eski", "diğer", "diger",
+    })
 
     @classmethod
     def _tokenize_bank_name(cls, name: str) -> set:
@@ -523,16 +532,25 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         """
         Build bank index from the structured extractor's rendered text.
 
-        Looks for the ``## Banka İstihbaratı`` heading inside chunks,
-        then extracts official bank names from ``Banka: <name> |`` lines
-        underneath.  Falls back to regex scan if no structured section found.
+        Looks for the ``## Banka İstihbaratı`` heading inside chunks
+        (both in content AND in metadata header), then extracts official
+        bank names from ``Banka: <name> |`` lines.
+        Falls back to regex scan if no structured section found.
         """
         seen: set = set()
         bank_names: List[str] = []
 
         for doc in chunks:
             content = getattr(doc, 'content', '')
-            if not self._BANKA_SECTION_RE.search(content):
+            header = ''
+            if hasattr(doc, 'metadata') and doc.metadata:
+                header = (doc.metadata.get('header', '') or '')
+
+            is_banka_section = (
+                self._BANKA_SECTION_RE.search(content)
+                or 'banka istihbarat' in header.lower().replace('İ', 'i').replace('ı', 'i')
+            )
+            if not is_banka_section:
                 continue
             for m in self._BANKA_LINE_RE.finditer(content):
                 raw = m.group(1).strip().rstrip('.')
@@ -562,11 +580,19 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
     def _extract_bank_mention(cls, query: str) -> Optional[str]:
         """
         Extract the informal bank name mention from a user query.
-        "Emlak Bankası'ndaki limit..." → "Emlak Bankası"
+        "grubun emlak bankasındaki limit..." → "emlak Bankası"
+        Strips noise words (grubun, firmanın, etc.) from the captured prefix.
         """
         m = cls._QUERY_BANK_RE.search(query)
         if m:
             prefix = m.group(1).strip()
+            cleaned_parts = [
+                w for w in prefix.split()
+                if w.lower() not in cls._BANK_MENTION_NOISE_WORDS
+            ]
+            cleaned = " ".join(cleaned_parts)
+            if len(cleaned) >= 2:
+                return f"{cleaned} Bankası"
             if len(prefix) >= 2:
                 return f"{prefix} Bankası"
         return None
@@ -712,22 +738,29 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         self,
         bank_resolution: Dict,
         reranked_docs: list,
+        all_candidates: list = None,
     ) -> Dict:
         """
-        Bank-scope grounding guardrail — 3-tier scoping strategy.
+        Bank-scope grounding guardrail — 4-tier scoping strategy.
+
+        Searches ALL candidates (not just reranked top-K) so that bank-specific
+        chunks that ranked lower in semantic similarity are still discoverable.
 
         Tier 1 — ``substring_scoped``:
             Bank name substring found in chunks → use only those chunks.
         Tier 2 — ``fallback_banka_istihbarati_only``:
             Bank name not found, but chunks with "Banka İstihbaratı" header
             exist → use only those (LLM still runs, but with narrower context).
-        Tier 3 — ``blocked``:
-            No resolution or no relevant chunks at all → safe_answer, no LLM.
+        Tier 3 — ``soft_fallback``:
+            Bank was resolved but not found in any chunk text →
+            pass through reranked docs with a warning (LLM still runs).
+        Tier 4 — ``blocked``:
+            Confidence too low (bank not resolved at all) → safe_answer, no LLM.
         """
         norm_name = bank_resolution.get("normalized_bank_name")
         confidence = bank_resolution.get("match_confidence", "none")
 
-        # Gate: confidence too low → blocked
+        # Gate: confidence too low → blocked (Tier 4)
         if not norm_name or confidence not in self.BANK_GUARDRAIL_CONFIDENCE_THRESHOLD:
             logger.info(
                 f"🛡️ Bank guardrail BLOCKED: norm={norm_name}, "
@@ -742,14 +775,40 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 "scoped_count": 0,
             }
 
-        # Tier 1: substring match on the bank name
+        search_pool = all_candidates if all_candidates else reranked_docs
         search_key = self._bank_search_key(norm_name)
+
+        # Also build alternative search keys from the original mention
+        mention = bank_resolution.get("original_bank_mention", "")
+        alt_keys: List[str] = []
+        if mention:
+            mention_tokens = self._tokenize_bank_name(mention)
+            for t in mention_tokens:
+                if len(t) >= 4:
+                    alt_keys.append(t)
+
+        # Tier 1: substring match on the bank name — search ALL candidates
         scoped: list = []
         scoped_info: List[Dict] = []
 
-        for doc in reranked_docs:
+        for doc in search_pool:
             content_lower = getattr(doc, 'content', '').lower()
+            header = ''
+            if hasattr(doc, 'metadata') and doc.metadata:
+                header = (doc.metadata.get('header', '') or '').lower()
+
+            found = False
             if search_key and search_key in content_lower:
+                found = True
+            elif search_key and search_key in header:
+                found = True
+            else:
+                for ak in alt_keys:
+                    if ak in content_lower and 'banka' in content_lower:
+                        found = True
+                        break
+
+            if found:
                 scoped.append(doc)
                 scoped_info.append({
                     "filename": doc.filename,
@@ -760,7 +819,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             logger.info(
                 f"🛡️ Bank guardrail PASSED (substring_scoped): "
                 f"'{norm_name}' (key='{search_key}') "
-                f"found in {len(scoped)}/{len(reranked_docs)} chunks"
+                f"found in {len(scoped)}/{len(search_pool)} chunks"
             )
             return {
                 "passed": True,
@@ -772,14 +831,22 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 "scoped_docs": scoped,
             }
 
-        # Tier 2: fall back to chunks that contain "Banka İstihbaratı" header
+        # Tier 2: fall back to chunks with "Banka İstihbaratı" header — search ALL candidates
         banka_section_docs: list = []
         banka_section_info: List[Dict] = []
 
-        for doc in reranked_docs:
+        for doc in search_pool:
             content = getattr(doc, 'content', '')
-            if self._BANKA_SECTION_RE.search(content) or \
-               'banka istihbarat' in content.lower().replace('İ', 'i').replace('ı', 'i'):
+            header = ''
+            if hasattr(doc, 'metadata') and doc.metadata:
+                header = (doc.metadata.get('header', '') or '').lower()
+
+            is_banka_section = (
+                self._BANKA_SECTION_RE.search(content)
+                or 'banka istihbarat' in content.lower().replace('İ', 'i').replace('ı', 'i')
+                or 'banka istihbarat' in header.replace('İ', 'i').replace('ı', 'i')
+            )
+            if is_banka_section:
                 banka_section_docs.append(doc)
                 banka_section_info.append({
                     "filename": doc.filename,
@@ -790,7 +857,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             logger.info(
                 f"🛡️ Bank guardrail PASSED (fallback_banka_istihbarati_only): "
                 f"'{norm_name}' not in text, but {len(banka_section_docs)} "
-                f"'Banka İstihbaratı' chunks available"
+                f"'Banka İstihbaratı' chunks available in candidates"
             )
             return {
                 "passed": True,
@@ -802,7 +869,25 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 "scoped_docs": banka_section_docs,
             }
 
-        # Tier 3: nothing found → blocked
+        # Tier 3: bank was resolved but not in any chunk text →
+        # soft fallback: let LLM try with original reranked docs
+        if confidence in self.BANK_GUARDRAIL_CONFIDENCE_THRESHOLD:
+            logger.info(
+                f"🛡️ Bank guardrail SOFT FALLBACK: '{norm_name}' "
+                f"(confidence={confidence}) resolved but not in chunk text. "
+                f"Passing through {len(reranked_docs)} reranked docs to LLM."
+            )
+            return {
+                "passed": True,
+                "reason": "bank_resolved_but_not_in_text_soft_fallback",
+                "scoping_strategy": "soft_fallback",
+                "safe_answer": None,
+                "bank_scoped_chunks_used": [],
+                "scoped_count": len(reranked_docs),
+                "scoped_docs": reranked_docs,
+            }
+
+        # Tier 4: nothing found → blocked
         logger.info(
             f"🛡️ Bank guardrail BLOCKED: '{norm_name}' (key='{search_key}') "
             f"not found, no Banka İstihbaratı chunks either"
@@ -938,7 +1023,9 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
 
             # Guardrail activates only when user mentions a specific bank
             if bank_resolution is not None:
-                guardrail = self._apply_bank_guardrail(bank_resolution, reranked)
+                guardrail = self._apply_bank_guardrail(
+                    bank_resolution, reranked, all_candidates=candidates
+                )
                 scoped_docs = guardrail.pop("scoped_docs", None)
                 debug["bank_guardrail"] = guardrail
 
