@@ -308,13 +308,32 @@ class CreditIntelligencePDFExtractor:
     def _looks_like_banka_istihbarati(self, pd: "_PageData") -> bool:
         needles = ("genel limit", "nakit risk", "nakdi risk", "g.nakdi", "gayrinakdi", "teminat", "revize")
         hay = _tr_lower(pd.free_text or "")
-        # tablo hücrelerini de ekle
         for tbl in pd.tables[:3]:
             for row in tbl[:50]:
                 hay += " " + _tr_lower(" ".join(row))
         score = sum(1 for n in needles if n in hay)
         return score >= 2
-    
+
+    def _has_banka_istihbarati_table(self, pd: "_PageData") -> bool:
+        """
+        High-confidence check: page has a table whose header row contains
+        column names unique to Banka İstihbaratı (e.g. 'Banka Adı' + 'Limit/Risk').
+        """
+        for tbl in pd.tables:
+            for row in tbl[:5]:
+                combined = _tr_lower(' '.join(c for c in row if c))
+                has_bank_col = ('banka ad' in combined or 'banka adi' in combined)
+                has_finance_col = ('limit' in combined or 'risk' in combined)
+                if has_bank_col and has_finance_col:
+                    return True
+            for row in tbl[:5]:
+                joined = ' '.join(c for c in row if c)
+                if _BANK_NAME_RE.search(joined):
+                    other = _tr_lower(joined)
+                    if any(kw in other for kw in ("limit", "risk", "genel limit", "nakit")):
+                        return True
+        return False
+
     # ------------------------------------------------------- section assignment
 
     def _assign_sections(
@@ -327,13 +346,32 @@ class CreditIntelligencePDFExtractor:
         """
         Walk pages in order, assign each to a section.
         If a page has no header, it spills into the previous section.
+        Banka İstihbaratı content-based override takes priority when a page
+        contains a bank table even if the text header says otherwise.
         """
         assigned: Dict[str, List[_PageData]] = {}
         current_section: Optional[str] = None
 
         for pd in pages:
             if pd.section_header:
-                current_section = pd.section_header
+                if (pd.section_header != "banka_istihbarati"
+                        and self._has_banka_istihbarati_table(pd)):
+                    current_section = "banka_istihbarati"
+                    section_hits.append({
+                        "page": pd.page_num,
+                        "section": current_section,
+                        "override_from": pd.section_header,
+                    })
+                    logger.info(
+                        f"📑 Page {pd.page_num}: banka table override "
+                        f"'{pd.section_header}' -> 'banka_istihbarati'"
+                    )
+                    assigned.setdefault(current_section, []).append(pd)
+                    if pd.section_header not in ("banka_istihbarati",):
+                        assigned.setdefault(pd.section_header, []).append(pd)
+                    continue
+                else:
+                    current_section = pd.section_header
 
             elif self._looks_like_banka_istihbarati(pd):
                 current_section = "banka_istihbarati"
@@ -490,26 +528,14 @@ class CreditIntelligencePDFExtractor:
                     all_rows.append(entry)
         return all_rows
 
-    _TEMINAT_RE = re.compile(
-        r'teminat\s*[şs]art[ıi]\s*:\s*(.+?)(?:\s*$|\s*alınan|\s*alinan)',
-        re.IGNORECASE
-    )
-    _ALINAN_TEMINAT_RE = re.compile(
-        r'al[ıi]nan\s+teminat\s*:\s*(.*)',
-        re.IGNORECASE
-    )
-    _ALINAN_KEFIL_RE = re.compile(
-        r'al[ıi]nan\s+kefil\s*:\s*(.*)',
-        re.IGNORECASE
-    )
-
     def _build_banka_istihbarati(
         self, pages: List["_PageData"], warnings: List[str]
     ) -> List[Dict]:
         """
         Parse the Banka İstihbaratı section: one record per bank.
         Sub-rows (teminat şartı, alınan teminat, kefil, notes) are
-        attached to the preceding bank record.
+        attached to the preceding bank record by scanning each cell
+        individually for keyword patterns.
         """
         records: List[Dict] = []
         source_pages = [p.page_num for p in pages]
@@ -548,43 +574,65 @@ class CreditIntelligencePDFExtractor:
                         records.append(current_rec)
                     current_rec = rec
                 elif current_rec:
-                    joined = ' '.join(c for c in row if c).strip()
-                    if not joined:
-                        continue
-                    self._attach_sub_row(current_rec, joined)
+                    self._scan_sub_row_cells(current_rec, row)
 
         if current_rec:
             records.append(current_rec)
 
         return records
 
-    def _attach_sub_row(self, rec: Dict, text: str) -> None:
-        """Attach teminat, kefil, or note info from a sub-row to a bank record."""
-        m_teminat = self._TEMINAT_RE.search(text)
-        if m_teminat:
-            val = m_teminat.group(1).strip().rstrip('.')
-            if val:
-                existing = rec.get("teminat_sarti", "")
-                rec["teminat_sarti"] = f"{existing}; {val}" if existing else val
+    @staticmethod
+    def _scan_sub_row_cells(rec: Dict, row: List[str]) -> None:
+        """
+        Scan each cell of a non-bank row for teminat, kefil, and note data.
+        Works cell-by-cell to handle pdfplumber's cell splitting.
+        """
+        matched_any = False
 
-        m_alinan_tem = self._ALINAN_TEMINAT_RE.search(text)
-        if m_alinan_tem:
-            val = m_alinan_tem.group(1).strip()
-            rec.setdefault("alinan_teminat", "")
-            if val:
-                rec["alinan_teminat"] = val
+        for cell in row:
+            if not cell or not cell.strip():
+                continue
+            c = cell.strip()
+            c_lower = _tr_lower(c)
 
-        m_kefil = self._ALINAN_KEFIL_RE.search(text)
-        if m_kefil:
-            val = m_kefil.group(1).strip()
-            rec.setdefault("alinan_kefil", "")
-            if val:
-                rec["alinan_kefil"] = val
+            if 'teminat' in c_lower and ('sart' in c_lower or 'şart' in c_lower):
+                parts = re.split(r'[:\s]+', c, maxsplit=1)
+                if len(parts) > 1:
+                    val = parts[1].strip().rstrip('.')
+                else:
+                    val = c
+                m = re.search(r'(?:teminat\s*(?:[şs]art[ıi]?)?)\s*[:\s]+\s*(.+)',
+                              c, re.IGNORECASE)
+                if m:
+                    val = m.group(1).strip().rstrip('.')
+                if val and len(val) > 1:
+                    existing = rec.get("teminat_sarti", "")
+                    rec["teminat_sarti"] = f"{existing}; {val}" if existing else val
+                    matched_any = True
 
-        if not m_teminat and not m_alinan_tem and not m_kefil:
-            if len(text) > 5:
+            elif 'alinan teminat' in c_lower or 'alınan teminat' in c_lower:
+                m = re.search(r'al[ıi]nan\s+teminat\s*[:\s]+\s*(.*)',
+                              c, re.IGNORECASE)
+                if m:
+                    val = m.group(1).strip()
+                    if val:
+                        rec["alinan_teminat"] = val
+                        matched_any = True
+
+            elif 'alinan kefil' in c_lower or 'alınan kefil' in c_lower:
+                m = re.search(r'al[ıi]nan\s+kefil\s*[:\s]+\s*(.*)',
+                              c, re.IGNORECASE)
+                if m:
+                    val = m.group(1).strip()
+                    if val:
+                        rec["alinan_kefil"] = val
+                        matched_any = True
+
+        if not matched_any:
+            joined = ' '.join(c for c in row if c and c.strip()).strip()
+            if joined and len(joined) > 5:
                 rec.setdefault("notes", [])
-                rec["notes"].append(text)
+                rec["notes"].append(joined)
 
     def _parse_bank_row(
         self,
@@ -820,14 +868,19 @@ class CreditIntelligencePDFExtractor:
     @staticmethod
     def _detect_header_row(table: List[List[str]]) -> Optional[List[str]]:
         """
-        Heuristic: if the first row is predominantly non-numeric text,
-        treat it as the header.
+        Heuristic: if the first row's non-empty cells are predominantly
+        non-numeric text, treat it as the header.
+        Ignores empty cells in the ratio calculation so sparse PDF tables
+        (merged cells) are correctly detected.
         """
         if not table:
             return None
         first = table[0]
-        non_numeric = sum(1 for c in first if c and _parse_number(c) is None)
-        if non_numeric >= len(first) * 0.5 and len(first) >= 2:
+        non_empty = [c for c in first if c and c.strip()]
+        if not non_empty or len(first) < 2:
+            return None
+        non_numeric = sum(1 for c in non_empty if _parse_number(c) is None)
+        if non_numeric >= len(non_empty) * 0.5:
             return [c if c else f"col_{i}" for i, c in enumerate(first)]
         return None
 
