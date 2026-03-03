@@ -372,7 +372,7 @@ class CreditIntelligencePDFExtractor:
 
         builder_map = {
             "ozet_genel_bilgiler": self._build_kv_section,
-            "e_haciz_tarihcesi": self._build_list_section,
+            "e_haciz_tarihcesi": self._build_e_haciz,
             "erken_uyari_tarihcesi": self._build_list_section,
             "piyasa_istihbarati": self._build_kv_section,
             "banka_istihbarati": self._build_banka_istihbarati,
@@ -441,15 +441,79 @@ class CreditIntelligencePDFExtractor:
 
     # ---- specialized builders ---
 
+    _E_HACIZ_KNOWN_HEADERS = [
+        "sicil_no", "unvan", "yil", "odenen_adet", "odenen_tutar",
+        "odenmeyen_adet", "odenmeyen_tutar",
+    ]
+
+    def _build_e_haciz(
+        self, pages: List["_PageData"], warnings: List[str]
+    ) -> List[Dict]:
+        """
+        Parse E-Haciz Tarihçesi with known column semantics.
+        Falls back to generic list if column count doesn't match.
+        """
+        all_rows: List[Dict] = []
+        for pd in pages:
+            for tbl in pd.tables:
+                detected_headers = self._detect_header_row(tbl)
+                if detected_headers:
+                    data_rows = tbl[1:]
+                    headers = detected_headers
+                else:
+                    first_row = tbl[0] if tbl else []
+                    col_count = len(first_row)
+
+                    if col_count <= len(self._E_HACIZ_KNOWN_HEADERS) + 1:
+                        headers = self._E_HACIZ_KNOWN_HEADERS[:col_count]
+                        looks_like_header = (
+                            first_row
+                            and any(
+                                kw in ' '.join(first_row).lower()
+                                for kw in ('unvan', 'ünvan', 'adet', 'tutar', 'firma')
+                            )
+                        )
+                        data_rows = tbl[1:] if looks_like_header else tbl
+                    else:
+                        headers = [f"col_{i}" for i in range(col_count)]
+                        data_rows = tbl
+
+                for row in data_rows:
+                    if all(not c for c in row):
+                        continue
+                    entry: Dict[str, Any] = {}
+                    for i, h in enumerate(headers):
+                        val = row[i] if i < len(row) else ""
+                        num = _parse_number(val)
+                        entry[h] = num if num is not None else val
+                    entry["source_page"] = pd.page_num
+                    all_rows.append(entry)
+        return all_rows
+
+    _TEMINAT_RE = re.compile(
+        r'teminat\s*[şs]art[ıi]\s*:\s*(.+?)(?:\s*$|\s*alınan|\s*alinan)',
+        re.IGNORECASE
+    )
+    _ALINAN_TEMINAT_RE = re.compile(
+        r'al[ıi]nan\s+teminat\s*:\s*(.*)',
+        re.IGNORECASE
+    )
+    _ALINAN_KEFIL_RE = re.compile(
+        r'al[ıi]nan\s+kefil\s*:\s*(.*)',
+        re.IGNORECASE
+    )
+
     def _build_banka_istihbarati(
         self, pages: List["_PageData"], warnings: List[str]
     ) -> List[Dict]:
         """
         Parse the Banka İstihbaratı section: one record per bank.
-        Applies bank-name verification guardrail.
+        Sub-rows (teminat şartı, alınan teminat, kefil, notes) are
+        attached to the preceding bank record.
         """
         records: List[Dict] = []
         source_pages = [p.page_num for p in pages]
+        current_rec: Optional[Dict] = None
 
         all_tables = []
         for pd in pages:
@@ -480,9 +544,47 @@ class CreditIntelligencePDFExtractor:
                                 f"in page {pg} text"
                             )
                     rec["source_pages"] = source_pages
-                    records.append(rec)
+                    if current_rec:
+                        records.append(current_rec)
+                    current_rec = rec
+                elif current_rec:
+                    joined = ' '.join(c for c in row if c).strip()
+                    if not joined:
+                        continue
+                    self._attach_sub_row(current_rec, joined)
+
+        if current_rec:
+            records.append(current_rec)
 
         return records
+
+    def _attach_sub_row(self, rec: Dict, text: str) -> None:
+        """Attach teminat, kefil, or note info from a sub-row to a bank record."""
+        m_teminat = self._TEMINAT_RE.search(text)
+        if m_teminat:
+            val = m_teminat.group(1).strip().rstrip('.')
+            if val:
+                existing = rec.get("teminat_sarti", "")
+                rec["teminat_sarti"] = f"{existing}; {val}" if existing else val
+
+        m_alinan_tem = self._ALINAN_TEMINAT_RE.search(text)
+        if m_alinan_tem:
+            val = m_alinan_tem.group(1).strip()
+            rec.setdefault("alinan_teminat", "")
+            if val:
+                rec["alinan_teminat"] = val
+
+        m_kefil = self._ALINAN_KEFIL_RE.search(text)
+        if m_kefil:
+            val = m_kefil.group(1).strip()
+            rec.setdefault("alinan_kefil", "")
+            if val:
+                rec["alinan_kefil"] = val
+
+        if not m_teminat and not m_alinan_tem and not m_kefil:
+            if len(text) > 5:
+                rec.setdefault("notes", [])
+                rec["notes"].append(text)
 
     def _parse_bank_row(
         self,
@@ -788,8 +890,23 @@ def render_structured_text(data: Dict) -> str:
             parts.append(f"{k}: {v}")
         parts.append("")
 
-    # E-Haciz
-    _render_table_section(parts, sections, "e_haciz_tarihcesi", "E-Haciz Tarihçesi")
+    # E-Haciz — firma bazlı okunabilir format
+    e_haciz = sections.get("e_haciz_tarihcesi", [])
+    if e_haciz and isinstance(e_haciz, list):
+        parts.append("## E-Haciz Tarihçesi")
+        for entry in e_haciz:
+            unvan = entry.get("unvan", entry.get("col_1", "?"))
+            yil = entry.get("yil", entry.get("col_2", "?"))
+            od_adet = entry.get("odenen_adet", entry.get("col_3", "-"))
+            od_tutar = entry.get("odenen_tutar", entry.get("col_4", "-"))
+            odn_adet = entry.get("odenmeyen_adet", entry.get("col_5", "-"))
+            odn_tutar = entry.get("odenmeyen_tutar", entry.get("col_6", "-"))
+            parts.append(
+                f"Firma: {unvan} | Yıl: {yil} | "
+                f"Ödenen Haciz: {od_adet} adet, {_fmt_money(od_tutar) if isinstance(od_tutar, (int, float)) else od_tutar} TL | "
+                f"Ödenmeyen Haciz: {odn_adet} adet, {_fmt_money(odn_tutar) if isinstance(odn_tutar, (int, float)) else odn_tutar} TL"
+            )
+        parts.append("")
 
     # Erken Uyarı
     _render_table_section(parts, sections, "erken_uyari_tarihcesi", "Erken Uyarı Tarihçesi")
@@ -825,15 +942,24 @@ def render_structured_text(data: Dict) -> str:
             nr = nr_obj.get("value", None)
             gnr = gnr_obj.get("value", None)
 
-            # mevcut format tek currency varsayıyor; genel_limit currency'sini baz alıyoruz
             cur = gl_obj.get("currency", "TRY")
+
+            teminat = rec.get('teminat_sarti', '-') or '-'
+            alinan_tem = rec.get('alinan_teminat', '')
+            alinan_kefil = rec.get('alinan_kefil', '')
+            notes = rec.get('notes', [])
 
             parts.append(
                 f"Banka: {name} | Genel Limit: {_fmt_money(gl)} {cur} | "
                 f"Nakit Risk: {_fmt_money(nr)} {cur} | G.Nakdi Risk: {_fmt_money(gnr)} {cur} | "
-                f"Teminat: {rec.get('teminat_sarti', '-')} | "
+                f"Teminat Şartı: {teminat} | "
+                f"Alınan Teminat: {alinan_tem if alinan_tem else '-'} | "
+                f"Alınan Kefil: {alinan_kefil if alinan_kefil else '-'} | "
                 f"Revize: {rec.get('revize_tarihi', '-')}"
             )
+            if notes:
+                for note in notes:
+                    parts.append(f"  Not: {note}")
         parts.append("")
 
     # Memzuç
