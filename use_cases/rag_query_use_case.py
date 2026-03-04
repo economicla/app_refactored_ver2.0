@@ -597,6 +597,101 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 return f"{prefix} Bankası"
         return None
 
+    # ================================================================
+    # ENTITY / FIRM NAME EXTRACTION & CHUNK FOCUSING
+    # ================================================================
+
+    _ENTITY_STOP_WORDS = frozenset({
+        "grubun", "gruptaki", "grup", "grubundaki", "grubu",
+        "firmanın", "firmanin", "firma", "firması",
+        "şirketin", "sirketin", "şirket", "sirket", "şirketinin",
+        "müşterinin", "musterinin", "müşteri", "musteri",
+        "nedir", "nelerdir", "neler", "neden", "nasıl", "kaç",
+        "kayıtları", "kayıtları", "kayitlari", "kayıtlar",
+        "bilgileri", "bilgisi", "bilgi", "durumu", "durumları",
+        "limit", "risk", "teminat", "haciz", "kredi", "banka",
+        "ne", "bu", "şu", "o", "ve", "ile", "için", "icin",
+        "olan", "var", "yok", "mı", "mi", "mu", "mü",
+        "bir", "tüm", "tum", "bütün", "butun", "herhangi",
+        "mevcut", "yeni", "eski", "diğer", "diger",
+        "hangi", "kadar", "gibi", "daha", "çok", "az",
+    })
+
+    _TR_SUFFIX_RE = re.compile(
+        r"(?:'?(?:nın|nin|nun|nün|ın|in|un|ün|ının|inin|"
+        r"daki|deki|taki|teki|ndaki|ndeki|"
+        r"dan|den|tan|ten|ndan|nden|"
+        r"ları|leri|lar|ler|"
+        r"ığın|iğin|uğun|üğün|"
+        r"ğın|ğin|ğun|ğün))+$",
+        re.IGNORECASE | re.UNICODE,
+    )
+
+    @classmethod
+    def _extract_entity_keywords(cls, query: str) -> List[str]:
+        """
+        Extract potential entity/firm name tokens from the query.
+        Strips Turkish suffixes and stop words, returns stems >= 3 chars.
+        """
+        tokens = re.findall(r'[a-züöçşığA-ZÜÖÇŞİĞ]+', query)
+        keywords: List[str] = []
+        for tok in tokens:
+            low = tok.lower()
+            if low in cls._ENTITY_STOP_WORDS:
+                continue
+            stem = cls._TR_SUFFIX_RE.sub('', low)
+            if not stem:
+                stem = low
+            if len(stem) >= 3:
+                keywords.append(stem)
+        return keywords
+
+    @staticmethod
+    def _focus_entity_chunks(
+        docs: list,
+        entity_keywords: List[str],
+        min_entity_matches: int = 1,
+    ) -> Tuple[list, Optional[str]]:
+        """
+        Reorder docs: chunks containing entity keywords come first.
+        Returns (reordered_docs, matched_entity_display_name).
+        """
+        if not entity_keywords:
+            return docs, None
+
+        entity_docs = []
+        other_docs = []
+        matched_name: Optional[str] = None
+
+        for doc in docs:
+            content_lower = getattr(doc, 'content', '').lower()
+            match_count = sum(1 for kw in entity_keywords if kw in content_lower)
+            if match_count >= min_entity_matches:
+                entity_docs.append(doc)
+                if not matched_name:
+                    for kw in entity_keywords:
+                        idx = content_lower.find(kw)
+                        if idx >= 0:
+                            end = content_lower.find('|', idx)
+                            if end < 0:
+                                end = min(idx + 60, len(content_lower))
+                            snippet = getattr(doc, 'content', '')[idx:end].strip()
+                            first_line = snippet.split('\n')[0].strip().rstrip('|').strip()
+                            if len(first_line) > len(kw):
+                                matched_name = first_line
+                                break
+            else:
+                other_docs.append(doc)
+
+        if entity_docs:
+            logger.info(
+                f"🎯 Entity focus: {len(entity_docs)}/{len(docs)} chunks "
+                f"match keywords {entity_keywords}, entity='{matched_name}'"
+            )
+            return entity_docs + other_docs, matched_name
+
+        return docs, None
+
     def _normalize_bank_name(
         self,
         mention: str,
@@ -674,17 +769,25 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
     ) -> Optional[Dict]:
         """
         Full bank entity resolution pipeline:
-        1. Extract bank mention from query
-        2. Build bank index from İstihbarat chunks
-        3. Fuzzy match mention → official name
+        1. Extract bank mention from query (regex)
+        2. If regex fails, reverse-match query tokens against bank index
+        3. Build bank index from İstihbarat chunks
+        4. Fuzzy match mention → official name
 
         Returns normalization result dict, or None if no bank mention found.
         """
         mention = self._extract_bank_mention(query)
+
+        bank_index = self._extract_bank_index_from_chunks(chunks)
+
+        if not mention and bank_index:
+            mention = self._reverse_match_bank(query, bank_index)
+            if mention:
+                logger.info(f"🏦 Reverse bank match: '{mention}' from query tokens")
+
         if not mention:
             return None
 
-        bank_index = self._extract_bank_index_from_chunks(chunks)
         if not bank_index:
             return {
                 "normalized_bank_name": None,
@@ -697,6 +800,33 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         result = self._normalize_bank_name(mention, bank_index)
         result["bank_index_size"] = len(bank_index)
         return result
+
+    def _reverse_match_bank(self, query: str, bank_index: List[str]) -> Optional[str]:
+        """
+        When regex-based bank extraction fails, check if any bank name
+        from the index matches tokens in the query.
+        e.g. "kuveytteki" → stem "kuveyt" → matches "Kuveyt Türk Katılım Bankası"
+        """
+        query_stems = set(self._extract_entity_keywords(query))
+        if not query_stems:
+            return None
+
+        best_bank: Optional[str] = None
+        best_overlap = 0
+
+        for official in bank_index:
+            bank_tokens = self._tokenize_bank_name(official)
+            if not bank_tokens:
+                continue
+            overlap = len(query_stems & bank_tokens)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_bank = official
+
+        if best_bank and best_overlap >= 1:
+            return best_bank
+
+        return None
 
     # ================================================================
     # BANK-SCOPE GROUNDING GUARDRAIL
@@ -1016,24 +1146,27 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             )
         debug["top3_chunks"] = top3
 
-        # Bank entity resolution + guardrail — only when EXTERNAL_BANK routing fires
-        if routing and routing.get("matched_rule_id") == "EXTERNAL_BANK":
-            bank_resolution = self._resolve_bank_entity(query_text, candidates)
+        # Bank entity resolution + guardrail
+        # Runs when EXTERNAL_BANK routing fires OR reverse bank match succeeds
+        bank_resolution = self._resolve_bank_entity(query_text, candidates)
+        if bank_resolution is not None:
             debug["bank_normalization"] = bank_resolution
 
-            # Guardrail activates only when user mentions a specific bank
-            if bank_resolution is not None:
-                guardrail = self._apply_bank_guardrail(
-                    bank_resolution, reranked, all_candidates=candidates
-                )
-                scoped_docs = guardrail.pop("scoped_docs", None)
-                debug["bank_guardrail"] = guardrail
+            if routing and routing.get("matched_rule_id") != "EXTERNAL_BANK":
+                debug["routing_decision"] = routing or {}
+                debug.setdefault("routing_decision", {})["bank_override"] = True
 
-                if not guardrail["passed"]:
-                    return [], debug
+            guardrail = self._apply_bank_guardrail(
+                bank_resolution, reranked, all_candidates=candidates
+            )
+            scoped_docs = guardrail.pop("scoped_docs", None)
+            debug["bank_guardrail"] = guardrail
 
-                if scoped_docs:
-                    reranked = scoped_docs
+            if not guardrail["passed"]:
+                return [], debug
+
+            if scoped_docs:
+                reranked = scoped_docs
 
         return reranked, debug
 
@@ -1192,6 +1325,22 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     debug_info=debug_info
                 )
 
+            # Step 2.5: Entity-aware chunk focusing
+            entity_keywords = self._extract_entity_keywords(query.query)
+            focused_docs, entity_display = self._focus_entity_chunks(
+                reranked_docs, entity_keywords
+            )
+            if entity_display:
+                debug_info["entity_focus"] = {
+                    "keywords": entity_keywords,
+                    "matched_entity": entity_display,
+                    "focused_chunks": sum(
+                        1 for d in focused_docs
+                        if any(kw in getattr(d, 'content', '').lower() for kw in entity_keywords)
+                    ),
+                }
+                reranked_docs = focused_docs
+
             retrieval_mode = debug_info["retrieval_mode"]
 
             # Step 3: Kontekst oluştur + Kaynak izle (source tracking)
@@ -1200,15 +1349,12 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             sources_with_metadata: List[SourceWithMetadata] = []
             
             for idx, doc in enumerate(reranked_docs):
-                # Metadata'dan başlık bilgisini al
                 header = None
                 if hasattr(doc, 'metadata') and doc.metadata:
                     header = doc.metadata.get('header')
                 
-                # Doküman türünü tespit et
                 doc_type = self._resolve_doc_type(doc)
 
-                # DEBUG: İlk chunk'ın içeriğini logla
                 if idx == 0:
                     logger.info(f"📋 Top chunk [{doc.filename}] header={header} "
                                 f"type={doc_type} "
@@ -1216,13 +1362,11 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                                 f"len={len(doc.content)} "
                                 f"preview={doc.content[:300]}")
                 
-                # Context'e ekle — doküman türü etiketi modelin görebilmesi için başa eklenir
                 header_text = f" [{header}]" if header else ""
                 context_parts.append(
                     f"[Kaynak {idx+1}: {doc.filename}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
                 )
                 
-                # Detaylı kaynak bilgisi
                 similarity_score = getattr(doc, 'similarity_score', 0)
                 content_preview = doc.content[:150] + "..." if len(doc.content) > 150 else doc.content
                 
@@ -1239,10 +1383,18 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             
             context = "\n\n---\n\n".join(context_parts)
 
-            # Step 4: Prompt oluştur (System prompt + Constraints)
+            # Step 4: Prompt oluştur (System prompt + Constraints + Entity hint)
             logger.info("📝 Building prompt with banking compliance constraints...")
+            entity_hint = ""
+            if entity_display:
+                entity_hint = (
+                    f"\n\nÖNEMLİ İPUCU: Soruda '{entity_display}' "
+                    f"hakkında bilgi istenmektedir. Kontekstte bu firma/kuruluş "
+                    f"adını dikkatlice arayın ve bulduğunuz tüm verileri raporlayın."
+                )
+
             prompt = f"""KONTEXT (Aşağıdaki finansal verileri dikkatlice oku ve soruyu cevapla):
-{context}
+{context}{entity_hint}
 
 SORU: {query.query}
 
@@ -1326,6 +1478,14 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                 yield "Sorgunuzla ilgili döküman bulunamadı."
                 return
 
+            # Step 2.5: Entity-aware chunk focusing (stream)
+            entity_keywords = self._extract_entity_keywords(query.query)
+            focused_docs, entity_display = self._focus_entity_chunks(
+                reranked_docs, entity_keywords
+            )
+            if entity_display:
+                reranked_docs = focused_docs
+
             retrieval_mode = debug_info["retrieval_mode"]
 
             # Step 3: Kontekst oluştur + Kaynak izle
@@ -1334,21 +1494,17 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             sources_with_metadata: List[SourceWithMetadata] = []
             
             for idx, doc in enumerate(reranked_docs):
-                # Metadata'dan başlık bilgisini al
                 header = None
                 if hasattr(doc, 'metadata') and doc.metadata:
                     header = doc.metadata.get('header')
                 
-                # Doküman türünü tespit et
                 doc_type = self._resolve_doc_type(doc)
 
-                # Context'e ekle — doküman türü etiketi modelin görebilmesi için başa eklenir
                 header_text = f" [{header}]" if header else ""
                 context_parts.append(
                     f"[Kaynak {idx+1}: {doc.filename}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
                 )
                 
-                # Detaylı kaynak bilgisi
                 similarity_score = getattr(doc, 'similarity_score', 0)
                 content_preview = doc.content[:150] + "..." if len(doc.content) > 150 else doc.content
                 
@@ -1366,8 +1522,16 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             context = "\n\n---\n\n".join(context_parts)
 
             # Step 4: Prompt oluştur
+            entity_hint = ""
+            if entity_display:
+                entity_hint = (
+                    f"\n\nÖNEMLİ İPUCU: Soruda '{entity_display}' "
+                    f"hakkında bilgi istenmektedir. Kontekstte bu firma/kuruluş "
+                    f"adını dikkatlice arayın ve bulduğunuz tüm verileri raporlayın."
+                )
+
             prompt = f"""KONTEXT (Aşağıdaki finansal verileri dikkatlice oku ve soruyu cevapla):
-{context}
+{context}{entity_hint}
 
 SORU: {query.query}
 
