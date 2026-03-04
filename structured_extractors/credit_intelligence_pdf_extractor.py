@@ -370,8 +370,6 @@ class CreditIntelligencePDFExtractor:
                         f"'{pd.section_header}' -> 'banka_istihbarati'"
                     )
                     assigned.setdefault(current_section, []).append(pd)
-                    if pd.section_header not in ("banka_istihbarati",):
-                        assigned.setdefault(pd.section_header, []).append(pd)
                     continue
                 else:
                     current_section = pd.section_header
