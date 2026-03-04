@@ -316,17 +316,20 @@ class CreditIntelligencePDFExtractor:
 
     def _has_banka_istihbarati_table(self, pd: "_PageData") -> bool:
         """
-        High-confidence check: page has a table whose header row contains
-        column names unique to Banka İstihbaratı (e.g. 'Banka Adı' + 'Limit/Risk').
+        High-confidence check: page contains Banka İstihbaratı data.
+        Searches ALL rows because pdfplumber may merge Erken Uyarı and
+        Banka İstihbaratı into a single table.
         """
         for tbl in pd.tables:
-            for row in tbl[:5]:
+            for row in tbl:
                 combined = _tr_lower(' '.join(c for c in row if c))
+                if 'banka istihbarat' in combined:
+                    return True
                 has_bank_col = ('banka ad' in combined or 'banka adi' in combined)
                 has_finance_col = ('limit' in combined or 'risk' in combined)
                 if has_bank_col and has_finance_col:
                     return True
-            for row in tbl[:5]:
+            for row in tbl:
                 joined = ' '.join(c for c in row if c)
                 if _BANK_NAME_RE.search(joined):
                     other = _tr_lower(joined)
@@ -528,11 +531,28 @@ class CreditIntelligencePDFExtractor:
                     all_rows.append(entry)
         return all_rows
 
+    @staticmethod
+    def _find_bi_subtable(tbl: List[List[str]]) -> List[List[str]]:
+        """
+        If a table spans multiple sections (e.g. Erken Uyarı + Banka İstihbaratı),
+        find where the Banka İstihbaratı sub-table starts and return only that part.
+        """
+        for i, row in enumerate(tbl):
+            combined = _tr_lower(' '.join(c for c in row if c))
+            if 'banka istihbarat' in combined and len(combined.strip()) < 60:
+                return tbl[i + 1:]
+            if ('banka ad' in combined or 'banka adi' in combined):
+                if 'limit' in combined or 'risk' in combined:
+                    return tbl[i:]
+        return tbl
+
     def _build_banka_istihbarati(
         self, pages: List["_PageData"], warnings: List[str]
     ) -> List[Dict]:
         """
         Parse the Banka İstihbaratı section: one record per bank.
+        Handles merged tables (e.g. Erken Uyarı + Banka İstihbaratı in one table)
+        by finding the BI sub-table boundary first.
         Sub-rows (teminat şartı, alınan teminat, kefil, notes) are
         attached to the preceding bank record by scanning each cell
         individually for keyword patterns.
@@ -547,14 +567,19 @@ class CreditIntelligencePDFExtractor:
                 all_tables.append((tbl, pd.page_num))
 
         for tbl, pg in all_tables:
-            headers = self._detect_header_row(tbl)
+            sub_tbl = self._find_bi_subtable(tbl)
+
+            headers = self._detect_header_row(sub_tbl)
             data_start = 1 if headers else 0
             if not headers:
-                headers = [f"col_{i}" for i in range(len(tbl[0]))]
+                if sub_tbl:
+                    headers = [f"col_{i}" for i in range(len(sub_tbl[0]))]
+                else:
+                    continue
 
             h_lower = [h.lower() for h in headers]
 
-            for row in tbl[data_start:]:
+            for row in sub_tbl[data_start:]:
                 if len(row) < 2:
                     continue
                 if all(not c for c in row):
@@ -674,13 +699,17 @@ class CreditIntelligencePDFExtractor:
                 cur,
             ),
             "gn_risk": _money(
-                _parse_number(_col(("g.n. risk", "gn risk", "gayrinakdi risk", "g.nakdi"))),
+                _parse_number(_col((
+                    "g.n.risk", "g.n. risk", "g.n risk",
+                    "gn risk", "gayrinakdi risk", "g.nakdi",
+                    "gayri nakdi",
+                ))),
                 cur,
             ),
-            "d_kd": _money(_parse_number(_col(("döviz", "d.kd", "d kd"))), cur),
-            "istih_tarihi": _col(("istih tarihi", "istihbarat tarihi")) or "",
-            "revize_tarihi": _col(("revize", "revize tarihi")) or "",
-            "status": _col(("durum", "status")) or "",
+            "d_kd": _money(_parse_number(_col(("döviz", "d.kd", "d kd", "d.kd."))), cur),
+            "istih_tarihi": _col(("istih tarihi", "istihbarat tarihi", "istih.", "istih")) or "",
+            "revize_tarihi": _col(("rvz", "revize", "revize tarihi", "rvz.")) or "",
+            "status": _col(("durum", "status", "statü", "stat")) or "",
             "teminat_sarti": _col(("teminat", "teminat şartı", "teminat sarti")) or "",
             "notes": [],
         }
