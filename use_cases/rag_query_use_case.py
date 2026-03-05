@@ -83,9 +83,9 @@ TEMEL KURALLAR:
 11. Soruda geçen dönem kontekstte yoksa, "Bilgi mevcut değil" YAZMA, bunun yerine kontekstteki mevcut dönemleri belirt ve o dönemlerin verilerini sun. Örneğin: "Soruda belirtilen 2024/6 dönemi verilerde bulunmamaktadır. Mevcut dönemler: 2023/12, 2024/12, 2025/6. Bu dönemlere ait veriler şöyledir: ..."
 
 BANKA İSTİHBARATI VE LİMİT RİSK TABLOLARI:
-- "Banka istihbaratına göre", "diğer bankalarda limit/risk" gibi sorularda önce "Banka İstihbaratı" bölümünü kullan. ZORUNLU: Kontekstte "Banka: ... | Firma: ..." biçiminde kaç satır varsa HEPSİNİ cevapta tek tek listele; birini bile atlama. Aynı banka farklı firmada (örn. Kuveyt Türk–AKTÜL KAĞIT, Kuveyt Türk–MKS MARMARA) geçiyorsa her biri ayrı satır olmalı. Banka adlarını K1, K2 gibi kodlarla değiştirme.
-- "Limit Risk Bilgileri (Bin TL)" veya "Kaynak Bazında Detay" tablolarından veri kullanacaksan: Ya tablonun TAMAMINI (tüm satırları) başlıkla birlikte ver, ya da o tabloyu cevaba hiç alma. Sadece birkaç K satırı (K11, K12 vb.) kısmen gösterme.
-- Cevabında hangi kısmın hangi bölümden geldiğini açık yaz: "**Banka İstihbaratı bölümünden:**" altında banka listesi; "**Limit Risk Bilgileri (Bin TL) tablosundan:**" veya "**Kaynak Bazında Detay'dan:**" altında ilgili tablo. Her bölümü ayrı başlıkla sun.
+- "Banka istihbaratına göre", "diğer bankalarda limit/risk" gibi sorularda kontekstteki TÜM kaynakları (Kaynak 1, 2, 3...) tara. Sadece "Banka: ... | Firma: ... | Genel Limit: [sayı] | Nakit Risk: [sayı]" biçiminde tam sayısal limit ve risk verisi olan satırları cevap tablosuna ekle. Limit veya risk sayısı olmayan, Özet İstihbarat veya başka bölümlerdeki eksik satırları tabloya ekleme. Aynı banka farklı firmada (Kuveyt Türk–AKTÜL KAĞIT, Kuveyt Türk–MKS MARMARA, Türkiye Finans–AKTÜL KAĞIT, Türkiye Finans–MKS MARMARA) tam veriyle geçiyorsa hepsini ayrı satırda ver. Banka adlarını K1, K2 ile değiştirme.
+- "Limit Risk Bilgileri (Bin TL)" veya "Kaynak Bazında Detay" tablolarından veri kullanacaksan: Ya tablonun TAMAMINI başlıkla ver, ya da hiç alma. Kısmen gösterme.
+- Cevabında "**Banka İstihbaratı bölümünden:**" altında sadece tam limit/risk verisi olan banka listesi; diğer bölümleri ayrı başlıkla belirt.
 
 ÇIKTI FORMATI:
 CEVAP: [Detaylı ve kesin yanıt]
@@ -1441,15 +1441,22 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     f"Her firma için ayrı ayrı bilgi verin."
                 )
             elif is_banka_istihbarati_genel:
+                # Kontekstte tam limit/risk verisi olan kaç banka satırı var say (özet/eksik karışmasın)
+                full_bank_rows = [
+                    line for line in context.split("\n")
+                    if "Banka:" in line and "Genel Limit:" in line
+                    and re.search(r"Genel Limit:\s*[\d.,]+", line)
+                ]
+                n_full = len(full_bank_rows)
                 hint = (
-                    "\n\nZORUNLU İPUCU: Bu soruda kontekstteki HER 'Banka: ... | Firma: ...' satırını "
-                    "cevaba eklemen gerekiyor. Önce kontekstte 'Banka:' ile başlayan satırları say; "
-                    "çıkan sayı kadar satırı **Banka İstihbaratı bölümünden:** başlığı altında tabloda "
-                    "mutlaka göster (Türkiye Emlak, Kuveyt Türk, Ziraat, Vakıf, Türkiye Finans; aynı banka "
-                    "farklı firmada ise her biri ayrı satır: örn. Kuveyt Türk–AKTÜL KAĞIT, Kuveyt Türk–MKS MARMARA). "
-                    "Eksik liste kabul edilmez. Limit Risk / Kaynak Bazında Detay kullanacaksan tablonun "
-                    "tamamını ver veya hiç verme."
+                    "\n\nİPUCU: Kontekstteki her kaynağı (Kaynak 1, 2, 3...) tara. Sadece 'Genel Limit: [sayı]' ve "
+                    "'Nakit Risk: [sayı]' geçen banka–firma satırlarını **Banka İstihbaratı bölümünden:** tablosuna yaz. "
+                    "Limit/risk sayısı olmayan veya Özet rapordaki eksik satırları ekleme. "
                 )
+                if n_full > 0:
+                    hint += f"Kontekstte bu formatta {n_full} banka satırı var; hepsini tabloya yaz (Kuveyt Türk–MKS MARMARA, Türkiye Finans–AKTÜL/MKS dahil)."
+                else:
+                    hint += "Tam verisi olan tüm satırları tek tek ekle."
             elif entity_display:
                 hint = (
                     f"\n\nÖNEMLİ İPUCU: Soruda '{entity_display}' "
@@ -1605,13 +1612,21 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                     f"Her firma için ayrı ayrı bilgi verin."
                 )
             elif is_banka_istihbarati_genel:
+                full_bank_rows = [
+                    line for line in context.split("\n")
+                    if "Banka:" in line and "Genel Limit:" in line
+                    and re.search(r"Genel Limit:\s*[\d.,]+", line)
+                ]
+                n_full = len(full_bank_rows)
                 hint = (
-                    "\n\nZORUNLU İPUCU: Bu soruda kontekstteki HER 'Banka: ... | Firma: ...' satırını "
-                    "cevaba eklemen gerekiyor. Önce kontekstte 'Banka:' ile başlayan satırları say; "
-                    "çıkan sayı kadar satırı **Banka İstihbaratı bölümünden:** başlığı altında tabloda "
-                    "mutlaka göster (Türkiye Emlak, Kuveyt Türk, Ziraat, Vakıf, Türkiye Finans; aynı banka "
-                    "farklı firmada ise her biri ayrı satır). Eksik liste kabul edilmez."
+                    "\n\nİPUCU: Kontekstteki her kaynağı tara. Sadece 'Genel Limit: [sayı]' ve 'Nakit Risk: [sayı]' "
+                    "geçen banka–firma satırlarını **Banka İstihbaratı bölümünden:** tablosuna yaz. Limit/risk olmayan "
+                    "veya Özet rapordaki eksik satırları ekleme. "
                 )
+                if n_full > 0:
+                    hint += f"Kontekstte bu formatta {n_full} banka satırı var; hepsini tabloya yaz."
+                else:
+                    hint += "Tam verisi olan tüm satırları tek tek ekle."
             elif entity_display:
                 hint = (
                     f"\n\nÖNEMLİ İPUCU: Soruda '{entity_display}' "
