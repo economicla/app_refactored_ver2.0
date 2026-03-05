@@ -82,6 +82,11 @@ TEMEL KURALLAR:
 10. Dönemler arası karşılaştırma istendiğinde, değerleri tablo veya liste halinde sun
 11. Soruda geçen dönem kontekstte yoksa, "Bilgi mevcut değil" YAZMA, bunun yerine kontekstteki mevcut dönemleri belirt ve o dönemlerin verilerini sun. Örneğin: "Soruda belirtilen 2024/6 dönemi verilerde bulunmamaktadır. Mevcut dönemler: 2023/12, 2024/12, 2025/6. Bu dönemlere ait veriler şöyledir: ..."
 
+BANKA İSTİHBARATI VE LİMİT RİSK TABLOLARI:
+- "Banka istihbaratına göre", "diğer bankalarda limit/risk" gibi sorularda önce "Banka İstihbaratı" bölümünü kullan. Kontekstte "Banka: ... | Firma: ..." satırları varsa TÜM banka kayıtlarını (aynı banka farklı firmada tekrar ediyorsa hepsini) tam banka adı + Firma + Limit + Risk + Teminat Şartı ile listele. Banka adlarını K1, K2, K11 gibi kodlarla değiştirme.
+- "Limit Risk Bilgileri (Bin TL)" veya "Kaynak Bazında Detay" tablolarından veri kullanacaksan: Ya tablonun TAMAMINI (tüm satırları) başlıkla birlikte ver, ya da o tabloyu cevaba hiç alma. Sadece birkaç K satırı (K11, K12 vb.) kısmen gösterme.
+- Cevabında hangi kısmın hangi bölümden geldiğini açık yaz: "**Banka İstihbaratı bölümünden:**" altında banka listesi; "**Limit Risk Bilgileri (Bin TL) tablosundan:**" veya "**Kaynak Bazında Detay'dan:**" altında ilgili tablo. Her bölümü ayrı başlıkla sun.
+
 ÇIKTI FORMATI:
 CEVAP: [Detaylı ve kesin yanıt]
 KAYNAKLAR: 
@@ -1383,18 +1388,45 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             
             context = "\n\n---\n\n".join(context_parts)
 
-            # Step 4: Prompt oluştur (System prompt + Constraints + Entity hint)
+            # Step 4: Prompt oluştur (System prompt + Constraints + Entity/Bank hint)
             logger.info("📝 Building prompt with banking compliance constraints...")
-            entity_hint = ""
-            if entity_display:
-                entity_hint = (
+            bank_norm = debug_info.get("bank_normalization")
+            resolved_bank = bank_norm.get("normalized_bank_name") if bank_norm else None
+
+            hint = ""
+            q_lower = query.query.lower()
+            is_banka_istihbarati_genel = (
+                "banka istihbarat" in q_lower or "diğer bankalarda" in q_lower
+                or "diğer bankalar" in q_lower
+            ) and not resolved_bank
+
+            if resolved_bank:
+                hint = (
+                    f"\n\nÖNEMLİ İPUCU: Soruda '{resolved_bank}' bankası hakkında bilgi "
+                    f"istenmektedir. 'Banka İstihbaratı' bölümündeki bu bankaya ait TÜM "
+                    f"firma bazlı kayıtları (limit, nakit risk, gayrinakdi risk, teminat "
+                    f"şartları, revize tarihi, durum) detaylı olarak listeleyin. "
+                    f"Her firma için ayrı ayrı bilgi verin."
+                )
+            elif is_banka_istihbarati_genel:
+                hint = (
+                    "\n\nÖNEMLİ İPUCU: Soru 'banka istihbaratı' veya diğer bankalardaki limit/risk "
+                    "hakkında. Cevabı bölümlere ayırın: (1) **Banka İstihbaratı bölümünden:** "
+                    "Kontekstteki 'Banka: ... | Firma: ...' satırlarının TÜMÜNÜ tam banka adı ile "
+                    "listeleyin (aynı banka birden fazla firmada geçiyorsa hepsini ayrı satırda verin). "
+                    "(2) Limit Risk Bilgileri veya Kaynak Bazında Detay kullanacaksanız tablonun "
+                    "tamamını verin veya hiç vermeyin; sadece K11, K12 gibi kısmi satır göstermeyin. "
+                    "Her bölümün hangi tablodan geldiğini açıkça yazın."
+                )
+            elif entity_display:
+                hint = (
                     f"\n\nÖNEMLİ İPUCU: Soruda '{entity_display}' "
                     f"hakkında bilgi istenmektedir. Kontekstte bu firma/kuruluş "
                     f"adını dikkatlice arayın ve bulduğunuz tüm verileri raporlayın."
                 )
 
             prompt = f"""KONTEXT (Aşağıdaki finansal verileri dikkatlice oku ve soruyu cevapla):
-{context}{entity_hint}
+{context}{hint}
 
 SORU: {query.query}
 
@@ -1522,16 +1554,41 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             context = "\n\n---\n\n".join(context_parts)
 
             # Step 4: Prompt oluştur
-            entity_hint = ""
-            if entity_display:
-                entity_hint = (
+            bank_norm = debug_info.get("bank_normalization")
+            resolved_bank = bank_norm.get("normalized_bank_name") if bank_norm else None
+
+            hint = ""
+            q_lower = query.query.lower()
+            is_banka_istihbarati_genel = (
+                "banka istihbarat" in q_lower or "diğer bankalarda" in q_lower
+                or "diğer bankalar" in q_lower
+            ) and not resolved_bank
+
+            if resolved_bank:
+                hint = (
+                    f"\n\nÖNEMLİ İPUCU: Soruda '{resolved_bank}' bankası hakkında bilgi "
+                    f"istenmektedir. 'Banka İstihbaratı' bölümündeki bu bankaya ait TÜM "
+                    f"firma bazlı kayıtları (limit, nakit risk, gayrinakdi risk, teminat "
+                    f"şartları, revize tarihi, durum) detaylı olarak listeleyin. "
+                    f"Her firma için ayrı ayrı bilgi verin."
+                )
+            elif is_banka_istihbarati_genel:
+                hint = (
+                    "\n\nÖNEMLİ İPUCU: Soru 'banka istihbaratı' veya diğer bankalardaki limit/risk "
+                    "hakkında. Cevabı bölümlere ayırın: (1) **Banka İstihbaratı bölümünden:** "
+                    "Kontekstteki 'Banka: ... | Firma: ...' satırlarının TÜMÜNÜ tam banka adı ile "
+                    "listeleyin. (2) Limit Risk Bilgileri veya Kaynak Bazında Detay kullanacaksanız "
+                    "tablonun tamamını verin veya hiç vermeyin. Her bölümün hangi tablodan geldiğini yazın."
+                )
+            elif entity_display:
+                hint = (
                     f"\n\nÖNEMLİ İPUCU: Soruda '{entity_display}' "
                     f"hakkında bilgi istenmektedir. Kontekstte bu firma/kuruluş "
                     f"adını dikkatlice arayın ve bulduğunuz tüm verileri raporlayın."
                 )
 
             prompt = f"""KONTEXT (Aşağıdaki finansal verileri dikkatlice oku ve soruyu cevapla):
-{context}{entity_hint}
+{context}{hint}
 
 SORU: {query.query}
 
