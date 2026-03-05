@@ -1029,13 +1029,18 @@ def render_structured_text(data: Dict) -> str:
             alinan_kefil = rec.get('alinan_kefil', '')
             notes = rec.get('notes', [])
 
+            firma = rec.get('group_or_firm', '').strip()
+            firma_part = f" | Firma: {firma}" if firma else ""
+            status = rec.get('status', '').strip()
+            status_part = f" | Durum: {status}" if status else ""
+
             parts.append(
-                f"Banka: {name} | Genel Limit: {_fmt_money(gl)} {cur} | "
+                f"Banka: {name}{firma_part} | Genel Limit: {_fmt_money(gl)} {cur} | "
                 f"Nakit Risk: {_fmt_money(nr)} {cur} | G.Nakdi Risk: {_fmt_money(gnr)} {cur} | "
                 f"Teminat Şartı: {teminat} | "
                 f"Alınan Teminat: {alinan_tem if alinan_tem else '-'} | "
                 f"Alınan Kefil: {alinan_kefil if alinan_kefil else '-'} | "
-                f"Revize: {rec.get('revize_tarihi', '-')}"
+                f"Revize: {rec.get('revize_tarihi', '-')}{status_part}"
             )
             if notes:
                 for note in notes:
