@@ -1062,7 +1062,12 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         """
         routing = self._detect_query_intent(query_text)
         preferred_type = self._normalize_doc_type(routing["doc_type"]) if routing else None
-        candidate_k = top_k * 6
+        q_lower = query_text.lower()
+        is_banka_istihbarati_query = (
+            "banka istihbarat" in q_lower or "diğer bankalarda" in q_lower
+            or "diğer bankalar" in q_lower
+        )
+        candidate_k = top_k * 10 if is_banka_istihbarati_query else top_k * 6
 
         debug: Dict = {
             "preferred_type": preferred_type,
@@ -1175,20 +1180,31 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
 
         return reranked, debug
 
+    _BANKA_ISTIHBARATI_HEADER_BOOST = 0.40
+
     def _rerank_chunks(self, documents: list, query: str, final_k: int,
                        dict_headers: List[str] = None) -> list:
         """
         Chunk'ları çoklu OTOMATİK sinyal ile yeniden sırala.
-        Hardcoded bölüm kuralı kullanmaz — tüm sorgular için genel çalışır.
-
-        Sinyaller:
-        1. Doküman türü boost/penalty (ROUTING_RULES — üst düzey)
-        2. Genel içerik skoru (sayısallık, tablo, kelime örtüşmesi — otomatik)
-        3. Sözlük kaynaklı bölüm başlığı boost (varsa — dict_headers)
-        4. Çeşitlilik: tercih edilen türden %75
+        "Banka istihbaratı" / "diğer bankalarda" sorgularında Banka İstihbaratı
+        başlıklı chunk'lar öne alınır (7 banka kaydının tamamı kontekste gelsin).
         """
         if not documents:
             return documents
+
+        q_lower = query.lower()
+        is_banka_istihbarati_query = (
+            "banka istihbarat" in q_lower or "diğer bankalarda" in q_lower
+            or "diğer bankalar" in q_lower
+        )
+
+        def _is_banka_istihbarati_chunk(doc, chunk_header: Optional[str]) -> bool:
+            if chunk_header and "banka istihbarat" in chunk_header.lower().replace("ı", "i"):
+                return True
+            content = getattr(doc, "content", "") or ""
+            if "## Banka İstihbaratı" in content or "Banka İstihbaratı" in content[:500]:
+                return True
+            return False
 
         routing = self._detect_query_intent(query)
         preferred_type = self._normalize_doc_type(routing["doc_type"]) if routing else None
@@ -1200,8 +1216,17 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 content_adj = self._score_chunk_relevance(doc, query)
                 chunk_header = self._get_chunk_header(doc)
                 header_adj = self._calc_header_similarity(chunk_header, dict_headers or [])
-                scored_docs.append((sim + content_adj + header_adj, "", chunk_header, doc))
+                banka_adj = (
+                    self._BANKA_ISTIHBARATI_HEADER_BOOST
+                    if is_banka_istihbarati_query and _is_banka_istihbarati_chunk(doc, chunk_header)
+                    else 0.0
+                )
+                scored_docs.append((sim + content_adj + header_adj + banka_adj, "", chunk_header, doc))
             scored_docs.sort(key=lambda x: x[0], reverse=True)
+            if is_banka_istihbarati_query:
+                bi_count = sum(1 for _, _, h, d in scored_docs[:final_k]
+                              if _is_banka_istihbarati_chunk(d, h))
+                logger.info(f"🔀 Banka İstihbaratı önceliği: top-{final_k} içinde {bi_count} BI chunk")
             logger.info(f"🔀 Niyet yok, genel skorlama uygulandı (dict_headers={bool(dict_headers)})")
             return [x[3] for x in scored_docs[:final_k]]
 
@@ -1229,7 +1254,14 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             chunk_header = self._get_chunk_header(doc)
             header_adj = self._calc_header_similarity(chunk_header, dict_headers or [])
 
-            boosted_sim = sim + type_adj + content_adj + header_adj
+            # 4. "Banka istihbaratı" sorgularında Banka İstihbaratı bölümü öne alınır
+            banka_adj = (
+                self._BANKA_ISTIHBARATI_HEADER_BOOST
+                if is_banka_istihbarati_query and _is_banka_istihbarati_chunk(doc, chunk_header)
+                else 0.0
+            )
+
+            boosted_sim = sim + type_adj + content_adj + header_adj + banka_adj
             scored_docs.append((boosted_sim, doc_type, chunk_header, doc))
 
         scored_docs.sort(key=lambda x: x[0], reverse=True)
