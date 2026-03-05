@@ -1041,29 +1041,31 @@ async def ingest_with_metadata(
 # ============ DOCUMENT LIST ============
 
 @router.get("/documents")
-
 async def list_documents(container: DIContainer = Depends(get_di_container)):
-
+    """
+    Tüm chunk'ları listele. Her öğede size_chars (içerik uzunluğu) bulunur;
+    ön yüz/pipe bunu kullanarak toplam karakter sayısını hesaplar.
+    """
     try:
-
         repo = container.get_document_repository()
+        documents = await repo.get_all_chunks()
 
-        # Yeni eklediğimiz veya adaptörde olan uygun fonksiyonu çağırıyoruz
+        results = []
+        for doc in documents:
+            created = doc.created_at.isoformat() if getattr(doc, "created_at", None) else None
+            content = getattr(doc, "content", "") or ""
+            results.append({
+                "id": doc.id,
+                "filename": doc.filename,
+                "chunk_index": getattr(doc, "chunk_index", 0),
+                "created_at": created,
+                "metadata": getattr(doc, "metadata", None) or {},
+                "size_chars": len(content),
+            })
 
-        documents = await repo.get_all_chunks() 
-
-        return {
-
-            "total": len(documents),
-
-            "results": documents
-
-        }
-
+        return {"total": len(results), "results": results}
     except Exception as e:
-
         logger.error(f"❌ List failed: {str(e)}")
-
         raise HTTPException(status_code=500, detail=str(e))
  
  
