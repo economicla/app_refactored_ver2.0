@@ -339,14 +339,14 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 if ":" in seg:
                     k, v = seg.split(":", 1)
                     k, v = k.strip().lower(), v.strip()
-                if k == "firma":
-                    row["firma"] = v
-                elif "genel limit" in k or k == "genel limit":
-                    row["genel_limit"] = (v.split()[0] if v else "").strip()
-                elif "nakit risk" in k or k == "nakit risk":
-                    row["nakit_risk"] = (v.split()[0] if v else "").strip()
-                elif "g.nakdi" in k or "gnakdi" in k or "gayri" in k:
-                    row["gn_risk"] = (v.split()[0] if v else "").strip()
+                    if k == "firma":
+                        row["firma"] = v
+                    elif "genel limit" in k or k == "genel limit":
+                        row["genel_limit"] = (v.split()[0] if v else "").strip()
+                    elif "nakit risk" in k or k == "nakit risk":
+                        row["nakit_risk"] = (v.split()[0] if v else "").strip()
+                    elif "g.nakdi" in k or "gnakdi" in k or "gayri" in k:
+                        row["gn_risk"] = (v.split()[0] if v else "").strip()
                 else:
                     if not row["banka"] and len(seg) > 2 and "Firma" not in seg and "Kaynak" not in seg:
                         row["banka"] = seg.strip()
