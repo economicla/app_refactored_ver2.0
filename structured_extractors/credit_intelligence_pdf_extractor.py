@@ -371,8 +371,21 @@ class CreditIntelligencePDFExtractor:
                     )
                     assigned.setdefault(current_section, []).append(pd)
                     continue
-                else:
-                    current_section = pd.section_header
+                # Devam sayfası: önceki sayfa Banka İstihbaratı idi, bu sayfada da aynı tablo yapısı var
+                if (current_section == "banka_istihbarati"
+                        and (self._has_banka_istihbarati_table(pd) or self._looks_like_banka_istihbarati(pd))):
+                    section_hits.append({
+                        "page": pd.page_num,
+                        "section": "banka_istihbarati",
+                        "continuation": True,
+                        "page_header": pd.section_header,
+                    })
+                    logger.info(
+                        f"📑 Page {pd.page_num}: banka_istihbarati devamı (sayfa başlığı: {pd.section_header})"
+                    )
+                    assigned.setdefault("banka_istihbarati", []).append(pd)
+                    continue
+                current_section = pd.section_header
 
             elif self._looks_like_banka_istihbarati(pd):
                 current_section = "banka_istihbarati"
