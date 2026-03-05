@@ -83,7 +83,7 @@ TEMEL KURALLAR:
 11. Soruda geçen dönem kontekstte yoksa, "Bilgi mevcut değil" YAZMA, bunun yerine kontekstteki mevcut dönemleri belirt ve o dönemlerin verilerini sun. Örneğin: "Soruda belirtilen 2024/6 dönemi verilerde bulunmamaktadır. Mevcut dönemler: 2023/12, 2024/12, 2025/6. Bu dönemlere ait veriler şöyledir: ..."
 
 BANKA İSTİHBARATI VE LİMİT RİSK TABLOLARI:
-- "Banka istihbaratına göre", "diğer bankalarda limit/risk" gibi sorularda önce "Banka İstihbaratı" bölümünü kullan. Kontekstte "Banka: ... | Firma: ..." satırları varsa TÜM banka kayıtlarını (aynı banka farklı firmada tekrar ediyorsa hepsini) tam banka adı + Firma + Limit + Risk + Teminat Şartı ile listele. Banka adlarını K1, K2, K11 gibi kodlarla değiştirme.
+- "Banka istihbaratına göre", "diğer bankalarda limit/risk" gibi sorularda önce "Banka İstihbaratı" bölümünü kullan. ZORUNLU: Kontekstte "Banka: ... | Firma: ..." biçiminde kaç satır varsa HEPSİNİ cevapta tek tek listele; birini bile atlama. Aynı banka farklı firmada (örn. Kuveyt Türk–AKTÜL KAĞIT, Kuveyt Türk–MKS MARMARA) geçiyorsa her biri ayrı satır olmalı. Banka adlarını K1, K2 gibi kodlarla değiştirme.
 - "Limit Risk Bilgileri (Bin TL)" veya "Kaynak Bazında Detay" tablolarından veri kullanacaksan: Ya tablonun TAMAMINI (tüm satırları) başlıkla birlikte ver, ya da o tabloyu cevaba hiç alma. Sadece birkaç K satırı (K11, K12 vb.) kısmen gösterme.
 - Cevabında hangi kısmın hangi bölümden geldiğini açık yaz: "**Banka İstihbaratı bölümünden:**" altında banka listesi; "**Limit Risk Bilgileri (Bin TL) tablosundan:**" veya "**Kaynak Bazında Detay'dan:**" altında ilgili tablo. Her bölümü ayrı başlıkla sun.
 
@@ -1442,13 +1442,13 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 )
             elif is_banka_istihbarati_genel:
                 hint = (
-                    "\n\nÖNEMLİ İPUCU: Soru 'banka istihbaratı' veya diğer bankalardaki limit/risk "
-                    "hakkında. Cevabı bölümlere ayırın: (1) **Banka İstihbaratı bölümünden:** "
-                    "Kontekstteki 'Banka: ... | Firma: ...' satırlarının TÜMÜNÜ tam banka adı ile "
-                    "listeleyin (aynı banka birden fazla firmada geçiyorsa hepsini ayrı satırda verin). "
-                    "(2) Limit Risk Bilgileri veya Kaynak Bazında Detay kullanacaksanız tablonun "
-                    "tamamını verin veya hiç vermeyin; sadece K11, K12 gibi kısmi satır göstermeyin. "
-                    "Her bölümün hangi tablodan geldiğini açıkça yazın."
+                    "\n\nZORUNLU İPUCU: Bu soruda kontekstteki HER 'Banka: ... | Firma: ...' satırını "
+                    "cevaba eklemen gerekiyor. Önce kontekstte 'Banka:' ile başlayan satırları say; "
+                    "çıkan sayı kadar satırı **Banka İstihbaratı bölümünden:** başlığı altında tabloda "
+                    "mutlaka göster (Türkiye Emlak, Kuveyt Türk, Ziraat, Vakıf, Türkiye Finans; aynı banka "
+                    "farklı firmada ise her biri ayrı satır: örn. Kuveyt Türk–AKTÜL KAĞIT, Kuveyt Türk–MKS MARMARA). "
+                    "Eksik liste kabul edilmez. Limit Risk / Kaynak Bazında Detay kullanacaksan tablonun "
+                    "tamamını ver veya hiç verme."
                 )
             elif entity_display:
                 hint = (
@@ -1606,11 +1606,11 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                 )
             elif is_banka_istihbarati_genel:
                 hint = (
-                    "\n\nÖNEMLİ İPUCU: Soru 'banka istihbaratı' veya diğer bankalardaki limit/risk "
-                    "hakkında. Cevabı bölümlere ayırın: (1) **Banka İstihbaratı bölümünden:** "
-                    "Kontekstteki 'Banka: ... | Firma: ...' satırlarının TÜMÜNÜ tam banka adı ile "
-                    "listeleyin. (2) Limit Risk Bilgileri veya Kaynak Bazında Detay kullanacaksanız "
-                    "tablonun tamamını verin veya hiç vermeyin. Her bölümün hangi tablodan geldiğini yazın."
+                    "\n\nZORUNLU İPUCU: Bu soruda kontekstteki HER 'Banka: ... | Firma: ...' satırını "
+                    "cevaba eklemen gerekiyor. Önce kontekstte 'Banka:' ile başlayan satırları say; "
+                    "çıkan sayı kadar satırı **Banka İstihbaratı bölümünden:** başlığı altında tabloda "
+                    "mutlaka göster (Türkiye Emlak, Kuveyt Türk, Ziraat, Vakıf, Türkiye Finans; aynı banka "
+                    "farklı firmada ise her biri ayrı satır). Eksik liste kabul edilmez."
                 )
             elif entity_display:
                 hint = (
