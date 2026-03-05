@@ -872,6 +872,22 @@ SORU: {request.query}
 
 YANIT (kesin, kaynaklı ve profesyonel):"""
 
+        # Banka istihbaratı teşhisi: sayfa 5 verisi (7 banka) kontekste var mı?
+        q_lower = request.query.lower()
+        if "banka istihbarat" in q_lower or "diğer bankalarda" in q_lower or "diğer bankalar" in q_lower:
+            bi_headers = sum(1 for c in chunks_detail if c.get("header") and "banka istihbarat" in (c.get("header") or "").lower().replace("ı", "i"))
+            page5_markers = ("MKS MARMARA", "Türkiye Finans", "650.000.000", "391.263", "203.000.000")
+            chunks_with_page5 = [
+                c["index"] for c in chunks_detail
+                if any(m in (c.get("full_content") or "") for m in page5_markers)
+            ]
+            debug_info["banka_istihbarati_diagnostic"] = {
+                "chunks_with_bi_header": bi_headers,
+                "chunk_indices_with_page5_data": chunks_with_page5,
+                "page5_in_context": len(chunks_with_page5) > 0,
+                "interpretation": "Sayfa 5 verisi kontekste yok; PDF yeniden yüklenmeli veya extractor devam sayfası atamasını kontrol et." if not chunks_with_page5 else "Sayfa 5 verisi kontekste var; LLM tüm bankaları özetlemiyor olabilir.",
+            }
+
         return {
             "query": request.query,
             "enhanced_query": enhanced_query if enhanced_query != request.query else None,
