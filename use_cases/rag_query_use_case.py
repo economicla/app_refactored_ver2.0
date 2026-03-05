@@ -319,6 +319,61 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 header = m.group(1).strip()
         return header
 
+    def _extract_bank_table_from_context(self, context: str) -> Tuple[List[Dict], str]:
+        """
+        Kontekstten 'Banka: ... | Firma: ... | Genel Limit: ...' satırlarını parse et.
+        Chunk bölünmelerinde satır ikiye ayrılmış olabilir; 'Banka:' ile bölüp her bloktan
+        banka adı, firma, limit, risk çıkar. Dönen tablo LLM'e hazır verilir, eksik kalmaz.
+        Returns:
+            (rows list, markdown table string). rows boşsa table da boş.
+        """
+        rows: List[Dict] = []
+        parts = context.split("Banka:")
+        for part in parts[1:]:
+            row: Dict = {"banka": "", "firma": "", "genel_limit": "", "nakit_risk": "", "gn_risk": ""}
+            # İlk | öncesi banka adı (veya ilk anlamlı metin)
+            segs = [s.strip() for s in part.split("|")]
+            for i, seg in enumerate(segs):
+                if not seg:
+                    continue
+                if ":" in seg:
+                    k, v = seg.split(":", 1)
+                    k, v = k.strip().lower(), v.strip()
+                if k == "firma":
+                    row["firma"] = v
+                elif "genel limit" in k or k == "genel limit":
+                    row["genel_limit"] = (v.split()[0] if v else "").strip()
+                elif "nakit risk" in k or k == "nakit risk":
+                    row["nakit_risk"] = (v.split()[0] if v else "").strip()
+                elif "g.nakdi" in k or "gnakdi" in k or "gayri" in k:
+                    row["gn_risk"] = (v.split()[0] if v else "").strip()
+                else:
+                    if not row["banka"] and len(seg) > 2 and "Firma" not in seg and "Kaynak" not in seg:
+                        row["banka"] = seg.strip()
+            if not row["banka"] and segs:
+                cand = segs[0].strip()
+                if cand and "Kaynak" not in cand and len(cand) > 3:
+                    row["banka"] = cand
+            # Banka adından [Kaynak ...] ve satır sonlarını temizle
+            if row.get("banka"):
+                row["banka"] = re.sub(r"\[Kaynak\s*\d+:.*?\]", "", row["banka"]).strip().replace("\n", " ")
+            # Sadece sayısal limiti olan kayıtları al (özet/eksikleri atla)
+            if re.search(r"[\d.,]+", row.get("genel_limit", "")):
+                rows.append(row)
+        if not rows:
+            return [], ""
+        # Markdown tablo
+        lines = [
+            "| BANKA | FİRMA | GENEL LİMİT (TRY) | NAKİT RİSK (TRY) | G.NAKDİ RİSK (TRY) |",
+            "|-------|-------|-------------------|------------------|---------------------|",
+        ]
+        for r in rows:
+            lines.append(
+                f"| {r.get('banka', '')} | {r.get('firma', '')} | {r.get('genel_limit', '')} | "
+                f"{r.get('nakit_risk', '')} | {r.get('gn_risk', '')} |"
+            )
+        return rows, "\n".join(lines)
+
     def _score_chunk_relevance(self, doc, query: str) -> float:
         """
         Genel içerik uygunluk skoru — hardcoded kural kullanmaz.
@@ -1441,18 +1496,27 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     f"Her firma için ayrı ayrı bilgi verin."
                 )
             elif is_banka_istihbarati_genel:
-                # Chunk bölünmelerinde satır ikiye ayrılabiliyor; kontekstte "Genel Limit: sayı" kaç kez varsa o kadar kayıt
-                n_full = min(len(re.findall(r"Genel Limit:\s*[\d.,]+", context)), 15)
-                logger.info(f"📊 Banka istihbaratı: kontekstte {n_full} tam limit/risk kaydı sayıldı")
-                hint = (
-                    "\n\nİPUCU: Kontekstteki her kaynağı (Kaynak 1, 2, 3...) tara. Sadece 'Genel Limit: [sayı]' ve "
-                    "'Nakit Risk: [sayı]' geçen banka–firma satırlarını **Banka İstihbaratı bölümünden:** tablosuna yaz. "
-                    "Limit/risk sayısı olmayan veya Özet rapordaki eksik satırları ekleme. "
-                )
-                if n_full > 0:
-                    hint += f"Kontekstte tam limit/risk verisi olan {n_full} banka kaydı var. Cevap tablosunda tam olarak {n_full} satır olmalı (Kuveyt Türk–MKS MARMARA, Türkiye Finans–AKTÜL KAĞIT, Türkiye Finans–MKS MARMARA dahil)."
+                # Kontekstten banka tablosunu kodla çıkar; LLM'e hazır tablo ver, eksik kalmasın
+                bank_rows, bank_table_md = self._extract_bank_table_from_context(context)
+                n_full = len(bank_rows)
+                logger.info(f"📊 Banka istihbaratı: kontekstten {n_full} banka kaydı çıkarıldı (tablo enjekte)")
+                if bank_table_md:
+                    hint = (
+                        "\n\nZORUNLU: Aşağıda kontekstten çıkarılmış TÜM banka kayıtları tablosu verilmiştir. "
+                        "Cevabında **Banka İstihbaratı bölümünden:** başlığı altında bu tabloyu AYNEN kullan, "
+                        "satır ekleme/çıkarma yapma. Ardından kısa toplam özeti yaz.\n\n"
+                        "ÇIKARILAN TABLO:\n" + bank_table_md
+                    )
                 else:
-                    hint += "Tam verisi olan tüm satırları tek tek ekle."
+                    n_fallback = min(len(re.findall(r"Genel Limit:\s*[\d.,]+", context)), 15)
+                    hint = (
+                        "\n\nİPUCU: Kontekstteki her kaynağı tara. 'Genel Limit: [sayı]' ve 'Nakit Risk: [sayı]' "
+                        "geçen tüm banka–firma satırlarını **Banka İstihbaratı bölümünden:** tablosunda listele. "
+                    )
+                    if n_fallback > 0:
+                        hint += f"Kontekstte {n_fallback} tam kayıt var; hepsini tabloya yaz."
+                    else:
+                        hint += "Tam verisi olan tüm satırları tek tek ekle."
             elif entity_display:
                 hint = (
                     f"\n\nÖNEMLİ İPUCU: Soruda '{entity_display}' "
@@ -1608,17 +1672,24 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                     f"Her firma için ayrı ayrı bilgi verin."
                 )
             elif is_banka_istihbarati_genel:
-                n_full = min(len(re.findall(r"Genel Limit:\s*[\d.,]+", context)), 15)
-                logger.info(f"📊 Banka istihbaratı (stream): kontekstte {n_full} tam limit/risk kaydı sayıldı")
-                hint = (
-                    "\n\nİPUCU: Kontekstteki her kaynağı tara. Sadece 'Genel Limit: [sayı]' ve 'Nakit Risk: [sayı]' "
-                    "geçen banka–firma satırlarını **Banka İstihbaratı bölümünden:** tablosuna yaz. Limit/risk olmayan "
-                    "veya Özet rapordaki eksik satırları ekleme. "
-                )
-                if n_full > 0:
-                    hint += f"Kontekstte tam limit/risk verisi olan {n_full} banka kaydı var. Cevap tablosunda tam olarak {n_full} satır olmalı."
+                bank_rows, bank_table_md = self._extract_bank_table_from_context(context)
+                n_full = len(bank_rows)
+                logger.info(f"📊 Banka istihbaratı (stream): kontekstten {n_full} banka kaydı çıkarıldı (tablo enjekte)")
+                if bank_table_md:
+                    hint = (
+                        "\n\nZORUNLU: Aşağıda kontekstten çıkarılmış TÜM banka kayıtları tablosu verilmiştir. "
+                        "Cevabında **Banka İstihbaratı bölümünden:** başlığı altında bu tabloyu AYNEN kullan.\n\n"
+                        "ÇIKARILAN TABLO:\n" + bank_table_md
+                    )
                 else:
-                    hint += "Tam verisi olan tüm satırları tek tek ekle."
+                    n_fallback = min(len(re.findall(r"Genel Limit:\s*[\d.,]+", context)), 15)
+                    hint = (
+                        "\n\nİPUCU: Kontekstteki her kaynağı tara. Tam limit/risk verisi olan tüm banka satırlarını listele. "
+                    )
+                    if n_fallback > 0:
+                        hint += f"Cevap tablosunda {n_fallback} satır olmalı."
+                    else:
+                        hint += "Tam verisi olan tüm satırları ekle."
             elif entity_display:
                 hint = (
                     f"\n\nÖNEMLİ İPUCU: Soruda '{entity_display}' "
