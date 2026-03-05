@@ -69,6 +69,23 @@ _SECTION_DEFS: List[_SectionDef] = [
 _THOUSAND_SEP_RE = re.compile(r'^-?\d{1,3}(\.\d{3})+(,\d+)?$')
 _DECIMAL_RE = re.compile(r'^-?\d+(,\d+)$')
 _INTEGER_RE = re.compile(r'^-?\d+$')
+_BI_FALLBACK_HEADERS = [
+    "banka adı",
+    "grup/firma",
+    "genel limit",
+    "nakit risk",
+    "g.n.risk",
+    "d.kd.",
+    "istih. tarihi",
+    "rvz. tar.",
+    "statü",
+]
+
+def _bi_headers_for_cols(n: int) -> List[str]:
+    base = _BI_FALLBACK_HEADERS[:]
+    if n <= len(base):
+        return base[:n]
+    return base + [f"col_{i}" for i in range(len(base), n)]
 
 
 def _tr_lower(s: str) -> str:
@@ -606,7 +623,7 @@ class CreditIntelligencePDFExtractor:
             data_start = 1 if headers else 0
             if not headers:
                 if sub_tbl:
-                    headers = [f"col_{i}" for i in range(len(sub_tbl[0]))]
+                    headers = _bi_headers_for_cols(len(sub_tbl[0]))
                 else:
                     continue
 
