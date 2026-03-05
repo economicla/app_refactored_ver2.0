@@ -314,6 +314,23 @@ class CreditIntelligencePDFExtractor:
         score = sum(1 for n in needles if n in hay)
         return score >= 2
 
+    def _looks_like_banka_istihbarati_continuation(self, pd: "_PageData") -> bool:
+        """
+        Devam sayfası: başlık satırı yok, sadece veri satırları var (banka adı + sayılar).
+        En az bir satırda banka adı regex + en az bir sayısal hücre varsa True.
+        """
+        for tbl in pd.tables:
+            for row in tbl:
+                if len(row) < 2:
+                    continue
+                joined = " ".join(str(c) for c in row if c)
+                if not _BANK_NAME_RE.search(joined):
+                    continue
+                has_number = any(_parse_number(c) is not None for c in row if c)
+                if has_number:
+                    return True
+        return False
+
     def _has_banka_istihbarati_table(self, pd: "_PageData") -> bool:
         """
         High-confidence check: page contains Banka İstihbaratı data.
@@ -372,8 +389,11 @@ class CreditIntelligencePDFExtractor:
                     assigned.setdefault(current_section, []).append(pd)
                     continue
                 # Devam sayfası: önceki sayfa Banka İstihbaratı idi, bu sayfada da aynı tablo yapısı var
+                # (başlıksız devam tablosu = banka adı + sayısal hücre satırları da kabul)
                 if (current_section == "banka_istihbarati"
-                        and (self._has_banka_istihbarati_table(pd) or self._looks_like_banka_istihbarati(pd))):
+                        and (self._has_banka_istihbarati_table(pd)
+                             or self._looks_like_banka_istihbarati(pd)
+                             or self._looks_like_banka_istihbarati_continuation(pd))):
                     section_hits.append({
                         "page": pd.page_num,
                         "section": "banka_istihbarati",
@@ -387,10 +407,12 @@ class CreditIntelligencePDFExtractor:
                     continue
                 current_section = pd.section_header
 
-            elif self._looks_like_banka_istihbarati(pd):
+            elif self._looks_like_banka_istihbarati(pd) or (
+                    current_section == "banka_istihbarati"
+                    and self._looks_like_banka_istihbarati_continuation(pd)):
                 current_section = "banka_istihbarati"
                 section_hits.append({"page": pd.page_num, "section": current_section})
-                logger.info(f"📑 Page {pd.page_num}: banka override -> '{current_section}'")
+                logger.info(f"📑 Page {pd.page_num}: banka override / devam -> '{current_section}'")
                 assigned.setdefault(current_section, []).append(pd)
                 continue
             else:
