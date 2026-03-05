@@ -1441,20 +1441,16 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     f"Her firma için ayrı ayrı bilgi verin."
                 )
             elif is_banka_istihbarati_genel:
-                # Kontekstte tam limit/risk verisi olan kaç banka satırı var say (özet/eksik karışmasın)
-                full_bank_rows = [
-                    line for line in context.split("\n")
-                    if "Banka:" in line and "Genel Limit:" in line
-                    and re.search(r"Genel Limit:\s*[\d.,]+", line)
-                ]
-                n_full = len(full_bank_rows)
+                # Chunk bölünmelerinde satır ikiye ayrılabiliyor; kontekstte "Genel Limit: sayı" kaç kez varsa o kadar kayıt
+                n_full = min(len(re.findall(r"Genel Limit:\s*[\d.,]+", context)), 15)
+                logger.info(f"📊 Banka istihbaratı: kontekstte {n_full} tam limit/risk kaydı sayıldı")
                 hint = (
                     "\n\nİPUCU: Kontekstteki her kaynağı (Kaynak 1, 2, 3...) tara. Sadece 'Genel Limit: [sayı]' ve "
                     "'Nakit Risk: [sayı]' geçen banka–firma satırlarını **Banka İstihbaratı bölümünden:** tablosuna yaz. "
                     "Limit/risk sayısı olmayan veya Özet rapordaki eksik satırları ekleme. "
                 )
                 if n_full > 0:
-                    hint += f"Kontekstte bu formatta {n_full} banka satırı var; hepsini tabloya yaz (Kuveyt Türk–MKS MARMARA, Türkiye Finans–AKTÜL/MKS dahil)."
+                    hint += f"Kontekstte tam limit/risk verisi olan {n_full} banka kaydı var. Cevap tablosunda tam olarak {n_full} satır olmalı (Kuveyt Türk–MKS MARMARA, Türkiye Finans–AKTÜL KAĞIT, Türkiye Finans–MKS MARMARA dahil)."
                 else:
                     hint += "Tam verisi olan tüm satırları tek tek ekle."
             elif entity_display:
@@ -1612,19 +1608,15 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                     f"Her firma için ayrı ayrı bilgi verin."
                 )
             elif is_banka_istihbarati_genel:
-                full_bank_rows = [
-                    line for line in context.split("\n")
-                    if "Banka:" in line and "Genel Limit:" in line
-                    and re.search(r"Genel Limit:\s*[\d.,]+", line)
-                ]
-                n_full = len(full_bank_rows)
+                n_full = min(len(re.findall(r"Genel Limit:\s*[\d.,]+", context)), 15)
+                logger.info(f"📊 Banka istihbaratı (stream): kontekstte {n_full} tam limit/risk kaydı sayıldı")
                 hint = (
                     "\n\nİPUCU: Kontekstteki her kaynağı tara. Sadece 'Genel Limit: [sayı]' ve 'Nakit Risk: [sayı]' "
                     "geçen banka–firma satırlarını **Banka İstihbaratı bölümünden:** tablosuna yaz. Limit/risk olmayan "
                     "veya Özet rapordaki eksik satırları ekleme. "
                 )
                 if n_full > 0:
-                    hint += f"Kontekstte bu formatta {n_full} banka satırı var; hepsini tabloya yaz."
+                    hint += f"Kontekstte tam limit/risk verisi olan {n_full} banka kaydı var. Cevap tablosunda tam olarak {n_full} satır olmalı."
                 else:
                     hint += "Tam verisi olan tüm satırları tek tek ekle."
             elif entity_display:
