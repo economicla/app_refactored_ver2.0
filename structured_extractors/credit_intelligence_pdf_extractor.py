@@ -246,15 +246,13 @@ def _parse_bi_line(line: str) -> Optional[Dict]:
     prefix = m.group(1).strip()
     genel_s, nakit_s, gn_s = m.group(2), m.group(3), m.group(4)
     istih_tarihi, revize_tarihi, status = m.group(5), m.group(6), m.group(7)
+    # Sayıları int yap; yoksa 0 (render'da dash olmasın)
     genel_v = _parse_number(genel_s)
     nakit_v = _parse_number(nakit_s)
     gn_v = _parse_number(gn_s)
-    if genel_v is not None:
-        genel_v = int(genel_v)
-    if nakit_v is not None:
-        nakit_v = int(nakit_v)
-    if gn_v is not None:
-        gn_v = int(gn_v)
+    genel_v = int(genel_v) if genel_v is not None else 0
+    nakit_v = int(nakit_v) if nakit_v is not None else 0
+    gn_v = int(gn_v) if gn_v is not None else 0
     # prefix = bank + firm; bilinen firma ile ayır (duplicate engellemesi için tutarlı isim)
     firm = ""
     bank = prefix
@@ -282,6 +280,16 @@ def _parse_bi_line(line: str) -> Optional[Dict]:
     }
 
 
+def _bi_record_key(rec: Dict) -> tuple:
+    """Duplicate key: bank_name, group_or_firm, istih_tarihi, revize_tarihi (Türkiye Finans AKTÜL vs MKS ayrı kalır)."""
+    return (
+        rec.get("bank_name", ""),
+        rec.get("group_or_firm", ""),
+        rec.get("istih_tarihi", ""),
+        rec.get("revize_tarihi", ""),
+    )
+
+
 def _parse_banka_istihbarati_lines(text: str) -> List[Dict]:
     """Metni satır satır tara; BI satır formatına uyan her satırdan bir record üret (duplicate yok)."""
     seen: set = set()
@@ -290,7 +298,7 @@ def _parse_banka_istihbarati_lines(text: str) -> List[Dict]:
         rec = _parse_bi_line(line)
         if not rec:
             continue
-        key = (rec.get("bank_name", ""), rec.get("group_or_firm", ""))
+        key = _bi_record_key(rec)
         if key in seen:
             continue
         seen.add(key)
@@ -343,7 +351,7 @@ def _parse_banka_istihbarati_from_text(text: str, page_num: int) -> List[Dict]:
     text_clean = text.replace("\r", "\n").strip()
     # 1) Satır formatı: KUVEYT TÜRK MKS MARMARA 650.000.000 391.263.000 0 TRY 5.11.2025 30.01.2026 OLUMLU
     line_records = _parse_banka_istihbarati_lines(text_clean)
-    seen_keys = {(r.get("bank_name"), r.get("group_or_firm", "")) for r in line_records}
+    seen_keys = {_bi_record_key(r) for r in line_records}
     records: List[Dict] = list(line_records)
     text_norm = _tr_lower(text_clean)
     # Normalize metinde banka eşleşmeleri (case + Türkçe karakter güvencesi)
@@ -435,7 +443,7 @@ def _parse_banka_istihbarati_from_text(text: str, page_num: int) -> List[Dict]:
             "notes": [],
         }
         if rec["genel_limit"].get("value") is not None or rec["nakit_risk"].get("value") is not None:
-            key = (rec.get("bank_name"), rec.get("group_or_firm", ""))
+            key = _bi_record_key(rec)
             if key not in seen_keys:
                 seen_keys.add(key)
                 records.append(rec)
@@ -863,90 +871,32 @@ class CreditIntelligencePDFExtractor:
     ) -> List[Dict]:
         """
         Parse the Banka İstihbaratı section: one record per bank.
-        Handles merged tables (e.g. Erken Uyarı + Banka İstihbaratı in one table)
-        by finding the BI sub-table boundary first.
-        Sub-rows (teminat şartı, alınan teminat, kefil, notes) are
-        attached to the preceding bank record by scanning each cell
-        individually for keyword patterns.
+        BI için sadece text fallback kullanılır (table parse devre dışı — bozuk kayıt/duplicate önlenir).
         """
         records: List[Dict] = []
         source_pages = [p.page_num for p in pages]
-        current_rec: Optional[Dict] = None
+        existing_keys: set = set()
 
-        all_tables = []
         for pd in pages:
-            for tbl in pd.tables:
-                all_tables.append((tbl, pd.page_num))
-
-        for tbl, pg in all_tables:
-            sub_tbl = self._find_bi_subtable(tbl)
-
-            headers = self._detect_header_row(sub_tbl)
-            data_start = 1 if headers else 0
-            if not headers:
-                if sub_tbl:
-                    headers = _bi_headers_for_cols(len(sub_tbl[0]))
-                else:
-                    continue
-
-            h_lower = [h.lower() for h in headers]
-
-            for row in sub_tbl[data_start:]:
-                if len(row) < 2:
-                    continue
-                if all(not c for c in row):
-                    continue
-
-                rec = self._parse_bank_row(row, h_lower, headers, pg)
-                if rec:
-                    bank_name = rec.get("bank_name", "")
-                    if bank_name:
-                        if not self._verify_bank_in_page(bank_name, pages, pg):
-                            warnings.append(
-                                f"GUARDRAIL: '{bank_name}' not verified "
-                                f"in page {pg} text"
-                            )
-                    rec["source_pages"] = source_pages
-                    if current_rec:
-                        records.append(current_rec)
-                    current_rec = rec
-                elif current_rec:
-                    self._scan_sub_row_cells(current_rec, row)
-
-        if current_rec:
-            records.append(current_rec)
-
-        # Text fallback: tablolar boş/eksik veya beklenen satırlar (Türkiye Finans, 391.263) yoksa
-        records_str = str(records)
-        need_text_fallback = (
-            not records
-            or ("Türkiye Finans" not in records_str and "391.263" not in records_str)
-        )
-        if need_text_fallback:
-            logger.info(
-                "BI text fallback triggered: tables empty or missing expected content (e.g. Türkiye Finans / 391.263)"
+            # Page text: free_text (pdfplumber extract_text) veya page_text/raw_text
+            text = (
+                getattr(pd, "free_text", None)
+                or getattr(pd, "raw_text", None)
+                or getattr(pd, "page_text", None)
             )
-            existing_keys = {(r.get("bank_name"), r.get("group_or_firm", "")) for r in records}
-            for pd in pages:
-                # Page text: free_text (pdfplumber extract_text) veya page_text/raw_text
-                text = (
-                    getattr(pd, "free_text", None)
-                    or getattr(pd, "raw_text", None)
-                    or getattr(pd, "page_text", None)
+            if not (text and str(text).strip()):
+                logger.warning(
+                    "BI text fallback: page %s has no free_text/raw_text/page_text — skip",
+                    getattr(pd, "page_num", "?"),
                 )
-                if not (text and str(text).strip()):
-                    logger.warning(
-                        "BI text fallback: page %s has no free_text/raw_text/page_text — skip",
-                        getattr(pd, "page_num", "?"),
-                    )
-                    continue
-                text_recs = _parse_banka_istihbarati_from_text(text, pd.page_num)
-                for rec in text_recs:
-                    key = (rec.get("bank_name"), rec.get("group_or_firm", ""))
-                    if key not in existing_keys:
-                        rec["source_pages"] = source_pages
-                        records.append(rec)
-                        existing_keys.add(key)
+                continue
+            text_recs = _parse_banka_istihbarati_from_text(text, pd.page_num)
+            for rec in text_recs:
+                key = _bi_record_key(rec)
+                if key not in existing_keys:
+                    rec["source_pages"] = source_pages
+                    records.append(rec)
+                    existing_keys.add(key)
 
         return records
 
