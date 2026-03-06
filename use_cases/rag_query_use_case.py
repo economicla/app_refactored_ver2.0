@@ -1400,12 +1400,15 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             if enhanced_query != query.query:
                 query_embedding = await self.embedding_service.embed_text(enhanced_query)
 
-            # Step 2: Document-type-aware strict retrieval
-            logger.info(f"🔎 Retrieving documents (final_k={query.top_k})...")
+            # Step 2: Document-type-aware strict retrieval (banka istihbaratı için daha fazla chunk)
+            q_lo = query.query.lower()
+            is_bi = "banka istihbarat" in q_lo or "diğer bankalarda" in q_lo or "diğer bankalar" in q_lo
+            effective_k = min(25, max(query.top_k, 18)) if is_bi else query.top_k
+            logger.info(f"🔎 Retrieving documents (final_k={effective_k})...")
             reranked_docs, debug_info = await self._retrieve_documents(
                 query_embedding=query_embedding,
                 query_text=query.query,
-                top_k=query.top_k,
+                top_k=effective_k,
                 dict_headers=dict_headers
             )
 
@@ -1606,12 +1609,15 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             if enhanced_query != query.query:
                 query_embedding = await self.embedding_service.embed_text(enhanced_query)
 
-            # Step 2: Document-type-aware strict retrieval
-            logger.info(f"🔎 Retrieving documents (final_k={query.top_k})...")
+            # Step 2: Document-type-aware strict retrieval (banka istihbaratı için daha fazla chunk)
+            q_lo = query.query.lower()
+            is_bi = "banka istihbarat" in q_lo or "diğer bankalarda" in q_lo or "diğer bankalar" in q_lo
+            effective_k = min(25, max(query.top_k, 18)) if is_bi else query.top_k
+            logger.info(f"🔎 Retrieving documents (final_k={effective_k})...")
             reranked_docs, debug_info = await self._retrieve_documents(
                 query_embedding=query_embedding,
                 query_text=query.query,
-                top_k=query.top_k,
+                top_k=effective_k,
                 dict_headers=dict_headers
             )
 
