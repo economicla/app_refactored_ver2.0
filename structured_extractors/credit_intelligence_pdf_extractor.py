@@ -346,6 +346,12 @@ def _parse_bi_line(line: str) -> Optional[Dict]:
         if idx >= 0:
             firm = known
             bank = prefix[:idx].strip()
+            # Birleştirilmiş satırda firm sonrası banka soneki varsa bank'a ekle (TÜRKİYE FİNANS KATILIM BANKASI A.Ş.)
+            after_firm = prefix[idx + len(known) :].strip()
+            if after_firm:
+                alow = _tr_lower(after_firm)
+                if alow.endswith("bankasi a.ş.") or alow.endswith("katilim bankasi"):
+                    bank = (bank + " " + after_firm).strip()
             break
     bank_name = _normalize_bank_name(bank) if bank else ""
     if not bank_name and prefix:
@@ -379,19 +385,61 @@ def _bi_record_key(rec: Dict) -> tuple:
     )
 
 
+def _is_bi_bank_suffix_line(line: str) -> bool:
+    """Sonraki satır sadece banka adı devamı mı (KATILIM BANKASI A.Ş. / BANKASI A.Ş. ile biter)."""
+    s = line.strip()
+    if not s or len(s) > 60:
+        return False
+    n = _tr_lower(s)
+    return (
+        n.endswith("katilim bankasi a.ş.")
+        or n.endswith("bankasi a.ş.")
+        or n.endswith("katilim bankasi")
+    )
+
+
 def _parse_banka_istihbarati_lines(text: str) -> List[Dict]:
-    """Metni satır satır tara; BI satır formatına uyan her satırdan bir record üret (duplicate yok)."""
+    """
+    Metni satır satır tara; BI satır formatına uyan her satırdan bir record üret (duplicate yok).
+    Bank adı bir sonraki satıra kaymışsa (örn. 'KATILIM BANKASI A.Ş.') birleştirip tek satır gibi parse et.
+    """
     seen: set = set()
     records: List[Dict] = []
-    for line in text.splitlines():
-        rec = _parse_bi_line(line)
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        # Sonraki satır banka soneki mi (TÜRKİYE FİNANS ... + KATILIM BANKASI A.Ş.)
+        if i + 1 < len(lines) and _is_bi_bank_suffix_line(lines[i + 1]):
+            next_line = lines[i + 1].strip()
+            m = _BI_LINE_RE.match(stripped)
+            if m:
+                prefix, g2, g3, g4, g5, g6, g7 = (
+                    m.group(1), m.group(2), m.group(3), m.group(4),
+                    m.group(5), m.group(6), m.group(7),
+                )
+                new_prefix = prefix.strip() + " " + next_line
+                new_line = f"{new_prefix} {g2} {g3} {g4} TRY {g5} {g6} {g7}"
+                rec = _parse_bi_line(new_line)
+                if rec:
+                    key = _bi_record_key(rec)
+                    if key not in seen:
+                        seen.add(key)
+                        records.append(rec)
+                i += 2
+                continue
+        rec = _parse_bi_line(stripped)
         if not rec:
+            i += 1
             continue
         key = _bi_record_key(rec)
         if key in seen:
+            i += 1
             continue
         seen.add(key)
         records.append(rec)
+        i += 1
     return records
 
 
@@ -432,116 +480,12 @@ _ensure_bank_name_norm_matches_turkiye_finans()
 def _parse_banka_istihbarati_from_text(text: str, page_num: int) -> List[Dict]:
     """
     Page text'ten (extract_text) Banka İstihbaratı satırlarını çıkar.
-    Önce satır formatı regex ile parse edilir (bank firm genel nakit gn TRY istih rvz status);
-    tablo yoksa blok bazlı fallback (banka adı + etiket/sıra sayıları) kullanılır.
+    Sadece satır bazlı parser kullanılır; blok parser kapalı (OLUMLU KATILIM BANKASI vb. hatalı kayıt engellenir).
     """
     if not text or not text.strip():
         return []
     text_clean = text.replace("\r", "\n").strip()
-    # 1) Satır formatı: KUVEYT TÜRK MKS MARMARA 650.000.000 391.263.000 0 TRY 5.11.2025 30.01.2026 OLUMLU
-    line_records = _parse_banka_istihbarati_lines(text_clean)
-    seen_keys = {_bi_record_key(r) for r in line_records}
-    records: List[Dict] = list(line_records)
-    text_norm = _tr_lower(text_clean)
-    # Normalize metinde banka eşleşmeleri (case + Türkçe karakter güvencesi)
-    for m in _BI_BANK_NAME_NORM_RE.finditer(text_norm):
-        raw_name = text_clean[m.start() : m.end()]
-        bank_name = _normalize_bank_name(raw_name)
-        if len(bank_name) < 4:
-            continue
-        start = m.end()
-        next_bank = _BI_BANK_NAME_NORM_RE.search(text_norm, start)
-        hard_end = min(
-            next_bank.start() if next_bank else len(text_norm),
-            start + 2000,
-            len(text_norm),
-        )
-        # 2–3 para sayısı bulunana kadar blok genişlet (en fazla 2000 karakter)
-        block_end = min(start + 500, hard_end)
-        block = text_clean[start:block_end]
-        block_norm = text_norm[start:block_end]
-        for _ in range(4):
-            nums_in_block = [
-                float(_parse_number(g))
-                for g in _BI_TEXT_NUMBER_RE.findall(block)
-                if _parse_number(g) is not None and not _DATE_RE.fullmatch(g)
-            ]
-            if len(nums_in_block) >= 2 or block_end >= hard_end:
-                break
-            block_end = min(block_end + 500, hard_end)
-            block = text_clean[start:block_end]
-            block_norm = text_norm[start:block_end]
-        # Etiket bazlı sayıları al
-        genel_v = None
-        nakit_v = None
-        gn_v = None
-        for lab_re, slot in (
-            (_BI_LABEL_GENEL, "genel"),
-            (_BI_LABEL_NAKIT, "nakit"),
-            (_BI_LABEL_GN, "gn"),
-        ):
-            lab_m = lab_re.search(block_norm)
-            if lab_m:
-                v = _parse_number(lab_m.group(1))
-                if v is not None:
-                    if slot == "genel":
-                        genel_v = float(v)
-                    elif slot == "nakit":
-                        nakit_v = float(v)
-                    else:
-                        gn_v = float(v)
-        # Son çare: sırayla sayı listesi
-        nums: List[float] = []
-        for num_m in _BI_TEXT_NUMBER_RE.finditer(block):
-            s = num_m.group(0)
-            if _DATE_RE.fullmatch(s):
-                continue
-            v = _parse_number(s)
-            if v is not None:
-                nums.append(float(v))
-        if genel_v is None and len(nums) >= 1:
-            genel_v = nums[0]
-        if nakit_v is None and len(nums) >= 2:
-            nakit_v = nums[1]
-        if gn_v is None and len(nums) >= 3:
-            gn_v = nums[2]
-        firma = ""
-        for known in _BI_FIRMA_KNOWN:
-            if known in block:
-                firma = known
-                break
-        status = ""
-        if "OLUMLU" in block.upper():
-            status = "OLUMLU"
-        elif "OLUMSUZ" in block.upper():
-            status = "OLUMSUZ"
-        dates = _DATE_RE.findall(block)
-        istih_tarihi = dates[0] if dates else ""
-        revize_tarihi = dates[1] if len(dates) > 1 else ""
-        rec = {
-            "bank_name": bank_name,
-            "group_or_firm": firma,
-            "genel_limit": _money(genel_v, "TRY"),
-            "nakit_risk": _money(nakit_v, "TRY"),
-            "gn_risk": _money(gn_v, "TRY"),
-            "d_kd": _money(None, "TRY"),
-            "istih_tarihi": istih_tarihi,
-            "revize_tarihi": revize_tarihi,
-            "status": status,
-            "teminat_sarti": "",
-            "notes": [],
-        }
-        if rec["genel_limit"].get("value") is not None or rec["nakit_risk"].get("value") is not None:
-            key = _bi_record_key(rec)
-            if key not in seen_keys:
-                seen_keys.add(key)
-                records.append(rec)
-    # Fallback tetiklenip parse çalışınca log: kaç banka, kaç record, ilk 1-2 preview
-    banks_found = sum(
-        1
-        for m in _BI_BANK_NAME_NORM_RE.finditer(text_norm)
-        if len(_normalize_bank_name(text_clean[m.start() : m.end()])) >= 4
-    )
+    records = _parse_banka_istihbarati_lines(text_clean)
     preview = [
         {
             "bank_name": r["bank_name"],
@@ -553,9 +497,8 @@ def _parse_banka_istihbarati_from_text(text: str, page_num: int) -> List[Dict]:
         for r in records[:2]
     ]
     logger.info(
-        "BI text fallback parse: page=%s, banks_found=%s, records_produced=%s, preview=%s",
+        "BI text fallback parse: page=%s, records_produced=%s, preview=%s",
         page_num,
-        banks_found,
         len(records),
         preview,
     )
