@@ -564,6 +564,46 @@ class PostgresDocumentAdapter(IDocumentRepository):
                 logger.debug(f"📖 Dictionary search not available: {e}")
                 return SearchResult(documents=[], search_time_ms=0.0)
 
+    async def get_bi_lines(
+        self,
+        filename: Optional[str] = None,
+        doc_type: str = "İstihbarat Raporu",
+    ) -> List[Dict[str, str]]:
+        """
+        Banka İstihbaratı içeren chunk'ları getir (deterministik BI tablosu için).
+        content ILIKE '%Banka:%' AND content ILIKE '%Genel Limit:%' olan satırları döner.
+        filename verilirse sadece o dosyadan, yoksa doc_type'a göre (veya tümü) çeker.
+        Returns: [{"content": str, "filename": str}, ...]
+        """
+        async with await self._get_session() as session:
+            try:
+                query = (
+                    select(DocumentModel.filename, DocumentModel.content)
+                    .where(DocumentModel.deleted_at.is_(None))
+                    .where(DocumentModel.content.ilike("%Banka:%"))
+                    .where(DocumentModel.content.ilike("%Genel Limit:%"))
+                )
+                if filename:
+                    query = query.where(DocumentModel.filename == filename)
+                elif doc_type:
+                    query = query.where(
+                        text(
+                            "(doc_metadata->>'doc_type' = :dt OR doc_metadata->>'doc_type' IS NULL)"
+                        ).bindparams(dt=doc_type)
+                    )
+                query = query.order_by(DocumentModel.filename, DocumentModel.chunk_index)
+                result = await session.execute(query)
+                rows = result.fetchall()
+                out = [
+                    {"filename": row[0], "content": row[1] or ""}
+                    for row in rows
+                ]
+                logger.info(f"✅ get_bi_lines: {len(out)} chunks (filename={filename!r})")
+                return out
+            except Exception as e:
+                logger.error(f"❌ get_bi_lines failed: {str(e)}")
+                return []
+
     async def get_by_filename(self, filename: str) -> List[DocumentChunk]:
         """Dosya adına göre tüm chunk'ları getir"""
         async with await self._get_session() as session:
