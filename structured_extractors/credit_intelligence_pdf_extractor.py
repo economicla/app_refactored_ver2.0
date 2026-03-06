@@ -233,27 +233,112 @@ _BI_LINE_RE = re.compile(
     r"^\s*(.+?)\s+(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+)\s+(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+)\s+(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+)\s+TRY\s+(\d{1,2}\.\d{1,2}\.\d{4})\s+(\d{1,2}\.\d{1,2}\.\d{4})\s+(OLUMLU|OLUMSUZ)\s*$",
     re.UNICODE,
 )
+# Alternative split: bank segment BANKASI veya BANKASI A.Ş. ile biter; başta OLUMLU/OLUMSUZ varsa atla
+_BI_ALTERNATIVE_BANK_RE = re.compile(
+    r"^(?:\s*(?:OLUMLU|OLUMSUZ)\s+)?(?P<bank>.+?BANKASI(?:\s+A\.Ş\.)?)\s+(?P<rest>.+)$",
+    re.IGNORECASE | re.UNICODE,
+)
+_BI_REST_RE = re.compile(
+    r"^\s*(.+?)\s+(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+)\s+(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+)\s+(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+)\s+TRY\s+(\d{1,2}\.\d{1,2}\.\d{4})\s+(\d{1,2}\.\d{1,2}\.\d{4})\s+(OLUMLU|OLUMSUZ)\s*$",
+    re.UNICODE,
+)
+# Bilinen bankalar (bank_name doğrulaması; substring/eq ile eşleşir)
+_BI_KNOWN_BANKS = (
+    "TÜRKİYE FİNANS",
+    "KUVEYT TÜRK",
+    "TÜRKİYE EMLAK",
+    "ZİRAAT KATILIM",
+    "VAKIF KATILIM",
+)
+# prefix bu kelimelerle başlıyorsa doğrudan alternative split kullan (bank_name OLUMLU ile başlamasın)
+_BI_BAD_PREFIXES = ("OLUMLU", "OLUMSUZ", "DURUM", "REVIZE", "TEMINAT")
 
 
-def _parse_bi_line(line: str) -> Optional[Dict]:
-    """
-    Tek satırı parse et: bank firm genel_limit nakit_risk gn_risk TRY istih rvz status.
-    Sayıları int'e çevir (391.263.000 -> 391263000). Mevcut record alan adlarıyla uyumlu dict döner.
-    """
-    m = _BI_LINE_RE.match(line.strip())
+def _is_valid_bi_bank_name(name: str) -> bool:
+    """BANKASI/BANKASI A.Ş. ile bitsin veya bilinen bankalar listesinde olsun; OLUMLU/OLUMSUZ ile başlamamalı."""
+    if not name or not name.strip():
+        return False
+    if _bi_prefix_requires_alternative(name):
+        return False
+    n = _tr_lower(name).strip()
+    if n.endswith("bankasi") or n.endswith("bankasi a.ş."):
+        return True
+    for b in _BI_KNOWN_BANKS:
+        bn = _tr_lower(b).strip()
+        if bn in n or n in bn:
+            return True
+    return False
+
+
+def _bi_prefix_requires_alternative(prefix: str) -> bool:
+    """Prefix OLUMLU/OLUMSUZ/DURUM/REVIZE/TEMINAT ile başlıyorsa alternative split zorunlu."""
+    p = prefix.strip().upper()
+    return any(p.startswith(bad) for bad in _BI_BAD_PREFIXES)
+
+
+def _parse_bi_line_alternative(line: str) -> Optional[Dict]:
+    """Alternative split: bank segmentini BANKASI (opsiyonel A.Ş.) regex ile bul, kalanı firm + sayılar olarak parse et."""
+    line = line.strip()
+    m = _BI_ALTERNATIVE_BANK_RE.match(line)
     if not m:
         return None
-    prefix = m.group(1).strip()
-    genel_s, nakit_s, gn_s = m.group(2), m.group(3), m.group(4)
-    istih_tarihi, revize_tarihi, status = m.group(5), m.group(6), m.group(7)
-    # Sayıları int yap; yoksa 0 (render'da dash olmasın)
+    bank = m.group("bank").strip()
+    rest = m.group("rest").strip()
+    m2 = _BI_REST_RE.match(rest)
+    if not m2:
+        return None
+    firm = m2.group(1).strip()
+    genel_s, nakit_s, gn_s = m2.group(2), m2.group(3), m2.group(4)
+    istih_tarihi, revize_tarihi, status = m2.group(5), m2.group(6), m2.group(7)
     genel_v = _parse_number(genel_s)
     nakit_v = _parse_number(nakit_s)
     gn_v = _parse_number(gn_s)
     genel_v = int(genel_v) if genel_v is not None else 0
     nakit_v = int(nakit_v) if nakit_v is not None else 0
     gn_v = int(gn_v) if gn_v is not None else 0
-    # prefix = bank + firm; bilinen firma ile ayır (duplicate engellemesi için tutarlı isim)
+    bank_name = _normalize_bank_name(bank)
+    if not bank_name:
+        bank_name = bank
+    # bank_name OLUMLU/OLUMSUZ ile başlamamalı (regex yanlış segment yakalasa bile reddet)
+    if _bi_prefix_requires_alternative(bank_name):
+        return None
+    return {
+        "bank_name": bank_name,
+        "group_or_firm": firm,
+        "genel_limit": _money(genel_v, "TRY"),
+        "nakit_risk": _money(nakit_v, "TRY"),
+        "gn_risk": _money(gn_v, "TRY"),
+        "d_kd": _money(None, "TRY"),
+        "istih_tarihi": istih_tarihi,
+        "revize_tarihi": revize_tarihi,
+        "status": status,
+        "teminat_sarti": "",
+        "notes": [],
+    }
+
+
+def _parse_bi_line(line: str) -> Optional[Dict]:
+    """
+    Tek satırı parse et: bank firm genel_limit nakit_risk gn_risk TRY istih rvz status.
+    bank_name doğrulaması: BANKASI/BANKASI A.Ş. ile bitmeli veya bilinen bankalar listesinde olmalı;
+    aksi veya prefix OLUMLU/OLUMSUZ vb. ise alternative split (BANKASI regex ile bank segmenti) uygulanır.
+    """
+    raw = line.strip()
+    m = _BI_LINE_RE.match(raw)
+    if not m:
+        return None
+    prefix = m.group(1).strip()
+    # Ek güvenlik: prefix OLUMLU/OLUMSUZ/DURUM/REVIZE/TEMINAT ile başlıyorsa doğrudan alternative
+    if _bi_prefix_requires_alternative(prefix):
+        return _parse_bi_line_alternative(raw)
+    genel_s, nakit_s, gn_s = m.group(2), m.group(3), m.group(4)
+    istih_tarihi, revize_tarihi, status = m.group(5), m.group(6), m.group(7)
+    genel_v = _parse_number(genel_s)
+    nakit_v = _parse_number(nakit_s)
+    gn_v = _parse_number(gn_s)
+    genel_v = int(genel_v) if genel_v is not None else 0
+    nakit_v = int(nakit_v) if nakit_v is not None else 0
+    gn_v = int(gn_v) if gn_v is not None else 0
     firm = ""
     bank = prefix
     for known in _BI_FIRMA_KNOWN:
@@ -265,6 +350,10 @@ def _parse_bi_line(line: str) -> Optional[Dict]:
     bank_name = _normalize_bank_name(bank) if bank else ""
     if not bank_name and prefix:
         bank_name = prefix.strip()
+    # bank_name doğrulaması veya OLUMLU/OLUMSUZ ile başlıyorsa alternative split dene
+    if not _is_valid_bi_bank_name(bank_name) or _bi_prefix_requires_alternative(bank_name):
+        alt = _parse_bi_line_alternative(raw)
+        return alt if alt else None
     return {
         "bank_name": bank_name,
         "group_or_firm": firm,
