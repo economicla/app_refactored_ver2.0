@@ -409,6 +409,111 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             )
         return table
 
+    # Memzuc Doluluk Oranı: dönem bazlı parse (deterministik cevap)
+    _MEMZUC_PERIOD_RE = re.compile(r"(?P<period>20\d{2}\s*/\s*\d{2})")
+    _MEMZUC_ROW_NAMES = (
+        "Umumi Limit",
+        "Toplam Nakdi Kredi",
+        "Toplam GN Kredi",
+        "TOPLAM",
+    )
+
+    def _parse_memzuc_doluluk_from_contents(
+        self, contents: List[Dict[str, str]]
+    ) -> Dict[str, Dict[str, int]]:
+        """
+        get_memzuc_lines ile alınan content'lerden dönem bazlı doluluk oranlarını çıkar.
+        Dönem başlığı 20xx/xx; her dönem bloğunda Umumi Limit, Toplam Nakdi Kredi, Toplam GN Kredi, TOPLAM
+        satırlarında satır sonundaki yüzde (1-2 rakam) yakalanır.
+        Returns: { "2025/12": {"Umumi Limit": 20, "Toplam Nakdi Kredi": 25, ...}, ... }
+        """
+        combined = "\n".join((item.get("content") or "").replace("\r", "\n") for item in contents)
+        if not combined.strip():
+            return {}
+        # Dönemleri bul; her dönem için bloğu al (sonraki döneme kadar veya sonu)
+        period_positions = list(self._MEMZUC_PERIOD_RE.finditer(combined))
+        result: Dict[str, Dict[str, int]] = {}
+        for i, m in enumerate(period_positions):
+            period_raw = (m.group("period") or "").strip()
+            period_norm = period_raw.replace(" ", "")  # "2025/12"
+            start = m.end()
+            end = period_positions[i + 1].start() if i + 1 < len(period_positions) else len(combined)
+            block = combined[start:end]
+            row_pcts: Dict[str, int] = {}
+            for line in block.splitlines():
+                line_clean = line.strip()
+                if not line_clean:
+                    continue
+                line_lower = line_clean.lower()
+                for row_name in self._MEMZUC_ROW_NAMES:
+                    if row_name.lower() in line_lower:
+                        # Satır sonundaki yüzde (1-2 rakam)
+                        pct_m = re.search(r"\d{1,2}\s*$", line_clean)
+                        if pct_m:
+                            try:
+                                row_pcts[row_name] = int(pct_m.group(0).strip())
+                            except ValueError:
+                                pass
+                        break
+            if row_pcts:
+                result[period_norm] = row_pcts
+        return result
+
+    def _extract_requested_period_from_query(self, query: str) -> Optional[str]:
+        """Sorgudan dönem çıkar (2025/10, 2024/12 vb.); normalize '2025/12'."""
+        m = self._MEMZUC_PERIOD_RE.search(query)
+        if not m:
+            return None
+        return (m.group("period") or "").replace(" ", "").strip()
+
+    def _select_closest_period(
+        self, requested: Optional[str], periods_found: List[str]
+    ) -> Tuple[Optional[str], bool]:
+        """
+        İstenen dönem varsa onu döndür; yoksa raporda mevcut en yakın dönemi seç.
+        Returns: (selected_period, exact_match).
+        """
+        if not periods_found:
+            return None, False
+        if requested and requested in periods_found:
+            return requested, True
+        # Sıralı listeyi al (2024/12, 2025/12 vb.) ve en güncel veya istenene en yakını seç
+        sorted_periods = sorted(periods_found)
+        if requested:
+            # İstenen dönemden sonra gelen ilk mevcut dönem (veya son dönem)
+            for p in sorted_periods:
+                if p >= requested:
+                    return p, False
+        return sorted_periods[-1], False
+
+    def _format_memzuc_doluluk_response(
+        self,
+        period_data: Dict[str, int],
+        period_label: str,
+        requested_period: Optional[str],
+        exact_match: bool,
+    ) -> str:
+        """Memzuc doluluk oranları için kısa tablo + açıklama."""
+        if not period_data:
+            return "Raporda bu dönem için doluluk oranı verisi bulunamadı."
+        lines = [
+            f"**{period_label} dönemi — Doluluk Oranları (%)**",
+            "",
+            "| Kalem | Doluluk Oranı (%) |",
+            "|-------|-------------------|",
+        ]
+        for row_name in self._MEMZUC_ROW_NAMES:
+            if row_name in period_data:
+                lines.append(f"| {row_name} | {period_data[row_name]} |")
+        body = "\n".join(lines)
+        if not exact_match and requested_period:
+            body = (
+                f"*Not: Raporda {requested_period} dönemi bulunmadığı için "
+                f"mevcut en yakın dönem olan **{period_label}** gösterilmektedir.*\n\n"
+                + body
+            )
+        return body
+
     def _extract_bank_table_from_context(self, context: str) -> Tuple[List[Dict], str]:
         """
         Kontekstten sadece 'Banka: ... | Firma: ... | Genel Limit: ...' formatındaki
@@ -1585,6 +1690,72 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 except Exception as e:
                     logger.warning(f"⚠️ Deterministik BI toplama hatası, LLM yoluna düşülüyor: {e}")
                     debug_info.setdefault("bi_deterministic", {})["error"] = str(e)
+
+            # Deterministik Memzuc Doluluk Oranı: memzuc / doluluk oranı / grup memzucu sorularında DB'den parse
+            routing_m = debug_info.get("routing_decision") or {}
+            q_lo = query.query.lower()
+            is_memzuc_query = (
+                "memzuc" in q_lo
+                or "doluluk oranı" in q_lo
+                or "grup memzucu" in q_lo
+                or routing_m.get("matched_rule_id") == "MEMZUC"
+            )
+            if is_memzuc_query and hasattr(self.document_repository, "get_memzuc_lines"):
+                try:
+                    get_memzuc_lines = getattr(self.document_repository, "get_memzuc_lines")
+                    preferred_filename = getattr(reranked_docs[0], "filename", None) if reranked_docs else None
+                    memzuc_chunks = await get_memzuc_lines(
+                        filename=preferred_filename,
+                        doc_type="İstihbarat Raporu",
+                    )
+                    if not memzuc_chunks and preferred_filename:
+                        memzuc_chunks = await get_memzuc_lines(filename=None, doc_type="İstihbarat Raporu")
+                    period_to_data = self._parse_memzuc_doluluk_from_contents(memzuc_chunks)
+                    periods_found = sorted(period_to_data.keys())
+                    requested_period = self._extract_requested_period_from_query(query.query)
+                    selected_period, exact_match = self._select_closest_period(
+                        requested_period, periods_found
+                    )
+                    if selected_period and period_to_data.get(selected_period):
+                        period_data = period_to_data[selected_period]
+                        answer = self._format_memzuc_doluluk_response(
+                            period_data,
+                            selected_period,
+                            requested_period,
+                            exact_match,
+                        )
+                        debug_info["memzuc_deterministic"] = True
+                        debug_info["memzuc_periods_found"] = periods_found
+                        debug_info["memzuc_selected_period"] = selected_period
+                        sources_memzuc = [
+                            SourceWithMetadata(
+                                filename=getattr(d, "filename", ""),
+                                chunk_index=getattr(d, "chunk_index", 0),
+                                header=None,
+                                similarity_score=getattr(d, "similarity_score", 0),
+                                content_preview=(getattr(d, "content", "") or "")[:150],
+                                chunk_size=len(getattr(d, "content", "") or ""),
+                            )
+                            for d in reranked_docs[:5]
+                        ]
+                        logger.info(
+                            f"📊 Deterministik Memzuc doluluk: selected_period={selected_period}, "
+                            f"periods_found={periods_found} (LLM atlandı)"
+                        )
+                        return RAGResponse(
+                            question=query.query,
+                            answer=answer,
+                            sources=sources_memzuc,
+                            model=await self.llm_service.get_model_name(),
+                            timestamp=datetime.utcnow(),
+                            user_id=query.user_id,
+                            debug_info=debug_info,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"⚠️ Deterministik Memzuc toplama hatası, LLM yoluna düşülüyor: {e}"
+                    )
+                    debug_info.setdefault("memzuc_deterministic", {})["error"] = str(e)
 
             # Step 2.5: Entity-aware chunk focusing
             entity_keywords = self._extract_entity_keywords(query.query)
