@@ -224,9 +224,79 @@ def _money_cells_from_row(row: List[str]) -> List[float]:
     return vals
 
 
-# Text fallback: sayfa tabloları boş/bozuk olduğunda free_text'ten banka satırı parse et
+# Text fallback: sayfa tabloları boş/bozuk olduğunda free_text/page_text'ten banka satırı parse et
 _BI_TEXT_NUMBER_RE = re.compile(r"\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?")
 _BI_FIRMA_KNOWN = ("MKS MARMARA", "AKTÜL KAĞIT", "BAHARİYE", "GROUP", "MKS Marmara", "Aktül Kağıt")
+
+# Satır formatı: <bank> <firm> <genel> <nakit> <gn> TRY <istih> <rvz> <status> (extract_text örnekleri)
+_BI_LINE_RE = re.compile(
+    r"^\s*(.+?)\s+(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+)\s+(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+)\s+(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+)\s+TRY\s+(\d{1,2}\.\d{1,2}\.\d{4})\s+(\d{1,2}\.\d{1,2}\.\d{4})\s+(OLUMLU|OLUMSUZ)\s*$",
+    re.UNICODE,
+)
+
+
+def _parse_bi_line(line: str) -> Optional[Dict]:
+    """
+    Tek satırı parse et: bank firm genel_limit nakit_risk gn_risk TRY istih rvz status.
+    Sayıları int'e çevir (391.263.000 -> 391263000). Mevcut record alan adlarıyla uyumlu dict döner.
+    """
+    m = _BI_LINE_RE.match(line.strip())
+    if not m:
+        return None
+    prefix = m.group(1).strip()
+    genel_s, nakit_s, gn_s = m.group(2), m.group(3), m.group(4)
+    istih_tarihi, revize_tarihi, status = m.group(5), m.group(6), m.group(7)
+    genel_v = _parse_number(genel_s)
+    nakit_v = _parse_number(nakit_s)
+    gn_v = _parse_number(gn_s)
+    if genel_v is not None:
+        genel_v = int(genel_v)
+    if nakit_v is not None:
+        nakit_v = int(nakit_v)
+    if gn_v is not None:
+        gn_v = int(gn_v)
+    # prefix = bank + firm; bilinen firma ile ayır (duplicate engellemesi için tutarlı isim)
+    firm = ""
+    bank = prefix
+    for known in _BI_FIRMA_KNOWN:
+        idx = prefix.rfind(known)
+        if idx >= 0:
+            firm = known
+            bank = prefix[:idx].strip()
+            break
+    bank_name = _normalize_bank_name(bank) if bank else ""
+    if not bank_name and prefix:
+        bank_name = prefix.strip()
+    return {
+        "bank_name": bank_name,
+        "group_or_firm": firm,
+        "genel_limit": _money(genel_v, "TRY"),
+        "nakit_risk": _money(nakit_v, "TRY"),
+        "gn_risk": _money(gn_v, "TRY"),
+        "d_kd": _money(None, "TRY"),
+        "istih_tarihi": istih_tarihi,
+        "revize_tarihi": revize_tarihi,
+        "status": status,
+        "teminat_sarti": "",
+        "notes": [],
+    }
+
+
+def _parse_banka_istihbarati_lines(text: str) -> List[Dict]:
+    """Metni satır satır tara; BI satır formatına uyan her satırdan bir record üret (duplicate yok)."""
+    seen: set = set()
+    records: List[Dict] = []
+    for line in text.splitlines():
+        rec = _parse_bi_line(line)
+        if not rec:
+            continue
+        key = (rec.get("bank_name", ""), rec.get("group_or_firm", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append(rec)
+    return records
+
 
 # Normalize edilmiş metinde banka adı (TÜRKİYE FİNANS KATILIM BANKASI A.Ş. → _tr_lower ile eşleşir)
 _BI_BANK_NAME_NORM_RE = re.compile(
@@ -264,16 +334,18 @@ _ensure_bank_name_norm_matches_turkiye_finans()
 
 def _parse_banka_istihbarati_from_text(text: str, page_num: int) -> List[Dict]:
     """
-    free_text'ten Banka İstihbaratı satırlarını regex ile çıkar.
-    pdfplumber tablo döndürmediğinde (sayfa 5 vb.) kullanılır.
-    Önce normalize metinde banka adı arar (TÜRKİYE FİNANS KATILIM BANKASI A.Ş. dahil).
-    Sayıları etiket bazlı (Genel Limit, Nakit Risk, G.N.Risk) yakalar; yoksa sırayla atar.
+    Page text'ten (extract_text) Banka İstihbaratı satırlarını çıkar.
+    Önce satır formatı regex ile parse edilir (bank firm genel nakit gn TRY istih rvz status);
+    tablo yoksa blok bazlı fallback (banka adı + etiket/sıra sayıları) kullanılır.
     """
     if not text or not text.strip():
         return []
     text_clean = text.replace("\r", "\n").strip()
+    # 1) Satır formatı: KUVEYT TÜRK MKS MARMARA 650.000.000 391.263.000 0 TRY 5.11.2025 30.01.2026 OLUMLU
+    line_records = _parse_banka_istihbarati_lines(text_clean)
+    seen_keys = {(r.get("bank_name"), r.get("group_or_firm", "")) for r in line_records}
+    records: List[Dict] = list(line_records)
     text_norm = _tr_lower(text_clean)
-    records: List[Dict] = []
     # Normalize metinde banka eşleşmeleri (case + Türkçe karakter güvencesi)
     for m in _BI_BANK_NAME_NORM_RE.finditer(text_norm):
         raw_name = text_clean[m.start() : m.end()]
@@ -363,7 +435,10 @@ def _parse_banka_istihbarati_from_text(text: str, page_num: int) -> List[Dict]:
             "notes": [],
         }
         if rec["genel_limit"].get("value") is not None or rec["nakit_risk"].get("value") is not None:
-            records.append(rec)
+            key = (rec.get("bank_name"), rec.get("group_or_firm", ""))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                records.append(rec)
     # Fallback tetiklenip parse çalışınca log: kaç banka, kaç record, ilk 1-2 preview
     banks_found = sum(
         1
@@ -853,6 +928,7 @@ class CreditIntelligencePDFExtractor:
             )
             existing_keys = {(r.get("bank_name"), r.get("group_or_firm", "")) for r in records}
             for pd in pages:
+                # Page text: free_text (pdfplumber extract_text) veya page_text/raw_text
                 text = (
                     getattr(pd, "free_text", None)
                     or getattr(pd, "raw_text", None)
