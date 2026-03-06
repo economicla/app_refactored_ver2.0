@@ -319,13 +319,23 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 header = m.group(1).strip()
         return header
 
+    @staticmethod
+    def _is_likely_bank_name(name: str) -> bool:
+        """Sadece gerçek banka adlarını kabul et; GNAkdi, Leasing, Toplam vb. tablo satırlarını elene."""
+        if not name or len(name.strip()) < 5:
+            return False
+        n = name.strip().upper()
+        if "BANKASI" in n or "BANK" in n or "KATILIM" in n:
+            return True
+        if any(x in n for x in ("TOPLAM", "GNAKDI", "LEASING", "AKREDİTİF", "UMUMI", "NAKDİ", "GN ", "TL", "YP", "KOD")):
+            return False
+        return False
+
     def _extract_bank_table_from_context(self, context: str) -> Tuple[List[Dict], str]:
         """
-        Kontekstten 'Banka: ... | Firma: ... | Genel Limit: ...' satırlarını parse et.
-        Chunk bölünmelerinde satır ikiye ayrılmış olabilir; önce 'Banka:' ile böl, yetersiz kalırsa
-        her 'Genel Limit: sayı' için geriye doğru Banka/Firma ara (fallback).
-        Returns:
-            (rows list, markdown table string). rows boşsa table da boş.
+        Kontekstten sadece 'Banka: ... | Firma: ... | Genel Limit: ...' formatındaki
+        gerçek banka satırlarını parse et. Limit Risk / Kaynak Bazında Detay tablolarındaki
+        satırlar (GNAkdi-TL, Leasing vb.) elenir.
         """
         rows: List[Dict] = []
         parts = context.split("Banka:")
@@ -355,22 +365,24 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     row["banka"] = cand
             if row.get("banka"):
                 row["banka"] = re.sub(r"\[Kaynak\s*\d+:.*?\]", "", row["banka"]).strip().replace("\n", " ")
-            if re.search(r"[\d.,]+", row.get("genel_limit", "")):
+            if re.search(r"[\d.,]+", row.get("genel_limit", "")) and self._is_likely_bank_name(row.get("banka", "")):
                 rows.append(row)
 
         genel_limit_matches = list(re.finditer(r"Genel Limit:\s*([\d.,]+)", context))
-        logger.info(f"📊 Banka tablosu: kontekstte {len(genel_limit_matches)} 'Genel Limit', parse {len(rows)} satır")
-        # Fallback: kontekstte daha fazla "Genel Limit: sayı" varsa satır chunk sınırında bölünmüş demektir
+        logger.info(f"📊 Banka tablosu: kontekstte {len(genel_limit_matches)} 'Genel Limit', parse {len(rows)} banka satırı")
         if len(genel_limit_matches) > len(rows):
-            rows = []
+            fallback_rows: List[Dict] = []
             for m in genel_limit_matches:
                 start = m.start()
                 block = context[max(0, start - 800) : start + 200]
+                if "Banka:" not in block:
+                    continue
                 row = {"banka": "", "firma": "", "genel_limit": (m.group(1) or "").strip(), "nakit_risk": "", "gn_risk": ""}
-                # Geriye doğru son "Banka:" ve "Firma:"
                 banka_m = re.search(r"Banka:\s*([^|\[\]]+?)(?:\s*\|\s*Firma:|\s*$)", block, re.DOTALL)
                 if banka_m:
                     row["banka"] = re.sub(r"\[Kaynak\s*\d+:.*?\]", "", banka_m.group(1)).strip().replace("\n", " ")[:120]
+                if not self._is_likely_bank_name(row["banka"]):
+                    continue
                 firma_m = re.search(r"Firma:\s*([^|]+)", block)
                 if firma_m:
                     row["firma"] = firma_m.group(1).strip()
@@ -380,10 +392,13 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 gn_m = re.search(r"G\.?Nakdi Risk:\s*([\d.,]+)", block, re.IGNORECASE)
                 if gn_m:
                     row["gn_risk"] = gn_m.group(1).strip()
-                if row["genel_limit"] and (row["banka"] or row["firma"]):
-                    rows.append(row)
-            logger.info(f"📊 Banka tablosu fallback parse: {len(genel_limit_matches)} Genel Limit → {len(rows)} satır")
+                if row["genel_limit"]:
+                    fallback_rows.append(row)
+            if fallback_rows:
+                rows = fallback_rows
+                logger.info(f"📊 Banka tablosu fallback: {len(rows)} banka satırı (yalnızca Banka: adı geçen bloklar)")
 
+        rows = [r for r in rows if self._is_likely_bank_name(r.get("banka", ""))]
         if not rows:
             return [], ""
         lines = [
