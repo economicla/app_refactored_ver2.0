@@ -322,8 +322,8 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
     def _extract_bank_table_from_context(self, context: str) -> Tuple[List[Dict], str]:
         """
         Kontekstten 'Banka: ... | Firma: ... | Genel Limit: ...' satırlarını parse et.
-        Chunk bölünmelerinde satır ikiye ayrılmış olabilir; 'Banka:' ile bölüp her bloktan
-        banka adı, firma, limit, risk çıkar. Dönen tablo LLM'e hazır verilir, eksik kalmaz.
+        Chunk bölünmelerinde satır ikiye ayrılmış olabilir; önce 'Banka:' ile böl, yetersiz kalırsa
+        her 'Genel Limit: sayı' için geriye doğru Banka/Firma ara (fallback).
         Returns:
             (rows list, markdown table string). rows boşsa table da boş.
         """
@@ -331,9 +331,8 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         parts = context.split("Banka:")
         for part in parts[1:]:
             row: Dict = {"banka": "", "firma": "", "genel_limit": "", "nakit_risk": "", "gn_risk": ""}
-            # İlk | öncesi banka adı (veya ilk anlamlı metin)
             segs = [s.strip() for s in part.split("|")]
-            for i, seg in enumerate(segs):
+            for seg in segs:
                 if not seg:
                     continue
                 if ":" in seg:
@@ -354,15 +353,39 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 cand = segs[0].strip()
                 if cand and "Kaynak" not in cand and len(cand) > 3:
                     row["banka"] = cand
-            # Banka adından [Kaynak ...] ve satır sonlarını temizle
             if row.get("banka"):
                 row["banka"] = re.sub(r"\[Kaynak\s*\d+:.*?\]", "", row["banka"]).strip().replace("\n", " ")
-            # Sadece sayısal limiti olan kayıtları al (özet/eksikleri atla)
             if re.search(r"[\d.,]+", row.get("genel_limit", "")):
                 rows.append(row)
+
+        genel_limit_matches = list(re.finditer(r"Genel Limit:\s*([\d.,]+)", context))
+        logger.info(f"📊 Banka tablosu: kontekstte {len(genel_limit_matches)} 'Genel Limit', parse {len(rows)} satır")
+        # Fallback: kontekstte daha fazla "Genel Limit: sayı" varsa satır chunk sınırında bölünmüş demektir
+        if len(genel_limit_matches) > len(rows):
+            rows = []
+            for m in genel_limit_matches:
+                start = m.start()
+                block = context[max(0, start - 800) : start + 200]
+                row = {"banka": "", "firma": "", "genel_limit": (m.group(1) or "").strip(), "nakit_risk": "", "gn_risk": ""}
+                # Geriye doğru son "Banka:" ve "Firma:"
+                banka_m = re.search(r"Banka:\s*([^|\[\]]+?)(?:\s*\|\s*Firma:|\s*$)", block, re.DOTALL)
+                if banka_m:
+                    row["banka"] = re.sub(r"\[Kaynak\s*\d+:.*?\]", "", banka_m.group(1)).strip().replace("\n", " ")[:120]
+                firma_m = re.search(r"Firma:\s*([^|]+)", block)
+                if firma_m:
+                    row["firma"] = firma_m.group(1).strip()
+                nakit_m = re.search(r"Nakit Risk:\s*([\d.,]+)", block)
+                if nakit_m:
+                    row["nakit_risk"] = nakit_m.group(1).strip()
+                gn_m = re.search(r"G\.?Nakdi Risk:\s*([\d.,]+)", block, re.IGNORECASE)
+                if gn_m:
+                    row["gn_risk"] = gn_m.group(1).strip()
+                if row["genel_limit"] and (row["banka"] or row["firma"]):
+                    rows.append(row)
+            logger.info(f"📊 Banka tablosu fallback parse: {len(genel_limit_matches)} Genel Limit → {len(rows)} satır")
+
         if not rows:
             return [], ""
-        # Markdown tablo
         lines = [
             "| BANKA | FİRMA | GENEL LİMİT (TRY) | NAKİT RİSK (TRY) | G.NAKDİ RİSK (TRY) |",
             "|-------|-------|-------------------|------------------|---------------------|",
