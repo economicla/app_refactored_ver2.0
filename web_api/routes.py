@@ -7,13 +7,10 @@ Dependency Injection ile Use Case'leri tetikler
 """
  
 import logging
-
+import unicodedata
 import hashlib
-
 import time
-
 import uuid
-
 from typing import AsyncGenerator, Optional, List, Dict, Any
 
 from datetime import datetime
@@ -872,14 +869,24 @@ SORU: {request.query}
 
 YANIT (kesin, kaynaklı ve profesyonel):"""
 
-        # Banka istihbaratı teşhisi: sayfa 5 verisi (7 banka) kontekste var mı?
+        # Banka istihbaratı teşhisi: sayfa 5 verisi (yalnızca sayısal marker) + Türkçe İ/i için norm
+        def _norm_tr(s: str) -> str:
+            if not s:
+                return ""
+            s = (s or "").casefold()
+            s = unicodedata.normalize("NFKD", s)
+            return "".join(c for c in s if not unicodedata.combining(c))
+
         q_lower = request.query.lower()
         if "banka istihbarat" in q_lower or "diğer bankalarda" in q_lower or "diğer bankalar" in q_lower:
-            bi_headers = sum(1 for c in chunks_detail if c.get("header") and "banka istihbarat" in (c.get("header") or "").lower().replace("ı", "i"))
-            page5_markers = ("MKS MARMARA", "Türkiye Finans", "650.000.000", "391.263", "203.000.000")
+            bi_headers = sum(
+                1 for c in chunks_detail
+                if c.get("header") and "banka istihbarat" in _norm_tr(c.get("header") or "")
+            )
+            page5_numeric = ("650.000.000", "391.263", "203.000.000")
             chunks_with_page5 = [
                 c["index"] for c in chunks_detail
-                if any(m in (c.get("full_content") or "") for m in page5_markers)
+                if any(m in (c.get("full_content") or "") for m in page5_numeric)
             ]
             debug_info["banka_istihbarati_diagnostic"] = {
                 "chunks_with_bi_header": bi_headers,
