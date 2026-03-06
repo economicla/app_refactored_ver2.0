@@ -604,6 +604,53 @@ class PostgresDocumentAdapter(IDocumentRepository):
                 logger.error(f"❌ get_bi_lines failed: {str(e)}")
                 return []
 
+    async def get_memzuc_lines(
+        self,
+        filename: Optional[str] = None,
+        doc_type: str = "İstihbarat Raporu",
+    ) -> List[Dict[str, str]]:
+        """
+        Memzuc / Doluluk Oranı içeren chunk'ları getir (Kredi Grubu Firma Memzucuları tablosu).
+        content içinde 'KREDİ GRUBU FİRMA MEMZUCULARI' veya 'MEMZUC BİLGİLERİ' veya 'Doluluk Oranı'
+        ve dönem formatı (2025/12, 2024/12 vb.) geçen chunk'ları döner.
+        Returns: [{"content": str, "filename": str}, ...]
+        """
+        async with await self._get_session() as session:
+            try:
+                # Memzuc sinyali: üç ifadeden biri + dönem formatı 20xx/xx
+                memzuc_cond = text(
+                    "("
+                    " content ILIKE '%KREDİ GRUBU FİRMA MEMZUCULARI%'"
+                    " OR content ILIKE '%MEMZUC BİLGİLERİ%'"
+                    " OR content ILIKE '%Doluluk Oranı%'"
+                    ") AND content ~ '20[0-9]{2}[[:space:]]*/[[:space:]]*[0-9]{2}'"
+                )
+                query = (
+                    select(DocumentModel.filename, DocumentModel.content)
+                    .where(DocumentModel.deleted_at.is_(None))
+                    .where(memzuc_cond)
+                )
+                if filename:
+                    query = query.where(DocumentModel.filename == filename)
+                elif doc_type:
+                    query = query.where(
+                        text(
+                            "(doc_metadata->>'doc_type' = :dt OR doc_metadata->>'doc_type' IS NULL)"
+                        ).bindparams(dt=doc_type)
+                    )
+                query = query.order_by(DocumentModel.filename, DocumentModel.chunk_index)
+                result = await session.execute(query)
+                rows = result.fetchall()
+                out = [
+                    {"filename": row[0], "content": row[1] or ""}
+                    for row in rows
+                ]
+                logger.info(f"✅ get_memzuc_lines: {len(out)} chunks (filename={filename!r})")
+                return out
+            except Exception as e:
+                logger.error(f"❌ get_memzuc_lines failed: {str(e)}")
+                return []
+
     async def get_by_filename(self, filename: str) -> List[DocumentChunk]:
         """Dosya adına göre tüm chunk'ları getir"""
         async with await self._get_session() as session:
