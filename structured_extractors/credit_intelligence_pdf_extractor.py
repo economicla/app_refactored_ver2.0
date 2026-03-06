@@ -69,6 +69,7 @@ _SECTION_DEFS: List[_SectionDef] = [
 _THOUSAND_SEP_RE = re.compile(r'^-?\d{1,3}(\.\d{3})+(,\d+)?$')
 _DECIMAL_RE = re.compile(r'^-?\d+(,\d+)$')
 _INTEGER_RE = re.compile(r'^-?\d+$')
+
 _BI_FALLBACK_HEADERS = [
     "banka adı",
     "grup/firma",
@@ -201,6 +202,26 @@ def _detect_currency(cell: str) -> str:
 def _money(value: Optional[int | float], currency: str = 'TRY') -> Dict:
     # None -> None kalsın; render tarafında "-" olarak gösterilecek
     return {"value": value, "currency": currency}
+
+
+_DATE_RE = re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{4}\b")
+
+
+def _money_cells_from_row(row: List[str]) -> List[float]:
+    """Satırdan para birimi sayılarını topla; tarih ve TRY/TL atlanır (kolon kayması fallback için)."""
+    vals: List[float] = []
+    for c in row:
+        if not c or not str(c).strip():
+            continue
+        s = str(c).strip()
+        if _DATE_RE.fullmatch(s):
+            continue
+        if s.upper() in ("TRY", "TL"):
+            continue
+        v = _parse_number(s)
+        if v is not None:
+            vals.append(float(v))
+    return vals
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +761,7 @@ class CreditIntelligencePDFExtractor:
 
         cur = self._default_currency
 
-        return {
+        rec = {
             "bank_name": bank_name,
             "group_or_firm": _col(("grup", "firma")) or "",
             "genel_limit": _money(_parse_number(_col(("genel limit",))), cur),
@@ -763,6 +784,25 @@ class CreditIntelligencePDFExtractor:
             "teminat_sarti": _col(("teminat", "teminat şartı", "teminat sarti")) or "",
             "notes": [],
         }
+
+        # FALLBACK: kolon kayması / header yoksa satırdan sayıları topla (sayfa 5 vb.)
+        if rec["genel_limit"].get("value") is None and rec["nakit_risk"].get("value") is None:
+            compact = [str(x).strip() for x in row if x and str(x).strip()]
+            nums = _money_cells_from_row(compact)
+            if len(nums) >= 2:
+                rec["genel_limit"]["value"] = nums[0]
+                rec["nakit_risk"]["value"] = nums[1]
+            if len(nums) >= 3 and rec["gn_risk"].get("value") is None:
+                rec["gn_risk"]["value"] = nums[2]
+            if not rec["group_or_firm"] and len(compact) >= 2:
+                rec["group_or_firm"] = compact[1]
+            if not rec["status"]:
+                for t in compact:
+                    if str(t).upper() in ("OLUMLU", "OLUMSUZ"):
+                        rec["status"] = str(t).upper()
+                        break
+
+        return rec
 
     @staticmethod
     def _verify_bank_in_page(
