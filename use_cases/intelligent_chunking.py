@@ -190,17 +190,18 @@ class IntelligentChunker:
 
         for c in chunks:
             content = c['content']
-            #Çok kısa chunk'ları atla
+            header = c.get('header') or ''
             if len(content.strip()) < 50:
                 continue
+            # Banka İstihbaratı bölümünü BÖLME: tüm banka kayıtları tek chunk'ta kalsın (4+3 satır ayrı chunk'lara düşmesin)
+            if 'Banka İstihbaratı' in header or 'banka_istihbarati' in header.lower():
+                final_chunks.append(c)
+                continue
             if len(content) > self.chunk_size * 1.2:
-                #Büyük chunk'ı tekrar böl
                 sub_chunks = self._chunk_by_paragraphs(content, header=c['header'])
                 for sub in sub_chunks:
-                    # Sub-chunk da kısa olabilir (ayraç kalıntısı vs.) → filtrele
                     if len(sub['content'].strip()) < 50:
                         continue
-                    #Header bilgisini koru
                     sub['header'] = c['header']
                     sub['level'] = c['level']
                     final_chunks.append(sub)
