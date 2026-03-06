@@ -224,6 +224,172 @@ def _money_cells_from_row(row: List[str]) -> List[float]:
     return vals
 
 
+# Text fallback: sayfa tabloları boş/bozuk olduğunda free_text'ten banka satırı parse et
+_BI_TEXT_NUMBER_RE = re.compile(r"\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?")
+_BI_FIRMA_KNOWN = ("MKS MARMARA", "AKTÜL KAĞIT", "BAHARİYE", "GROUP", "MKS Marmara", "Aktül Kağıt")
+
+# Normalize edilmiş metinde banka adı (TÜRKİYE FİNANS KATILIM BANKASI A.Ş. → _tr_lower ile eşleşir)
+_BI_BANK_NAME_NORM_RE = re.compile(
+    r"([a-züöçşığ][a-züöçşığ\s.\'\-\&]{2,79}?bankasi(?:\s*a\.?\s*ş\.?)?)",
+    re.UNICODE,
+)
+# Etiket bazlı sayı: "Genel Limit", "Nakit Risk", "G.N.Risk" vb. sonrası sayı
+_BI_LABEL_GENEL = re.compile(
+    r"(?:genel\s+limit|Genel\s+Limit)\s*[:\s]*(\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?)",
+    re.IGNORECASE,
+)
+_BI_LABEL_NAKIT = re.compile(
+    r"(?:nakit\s+risk|Nakit\s+Risk)\s*[:\s]*(\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?)",
+    re.IGNORECASE,
+)
+_BI_LABEL_GN = re.compile(
+    r"(?:g\.?\s*n\.?\s*risk|G\.?\s*N\.?\s*Risk|gn\s+risk)\s*[:\s]*(\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _ensure_bank_name_norm_matches_turkiye_finans() -> None:
+    """TÜRKİYE FİNANS KATILIM BANKASI A.Ş. gibi isimler normalize metinde yakalanmalı."""
+    sample = "TÜRKİYE FİNANS KATILIM BANKASI A.Ş."
+    norm = _tr_lower(sample)
+    if not _BI_BANK_NAME_NORM_RE.search(norm):
+        raise ValueError(
+            "BI bank name norm regex must match normalized 'TÜRKİYE FİNANS KATILIM BANKASI A.Ş.'; "
+            f"normalized={norm!r}"
+        )
+
+
+_ensure_bank_name_norm_matches_turkiye_finans()
+
+
+def _parse_banka_istihbarati_from_text(text: str, page_num: int) -> List[Dict]:
+    """
+    free_text'ten Banka İstihbaratı satırlarını regex ile çıkar.
+    pdfplumber tablo döndürmediğinde (sayfa 5 vb.) kullanılır.
+    Önce normalize metinde banka adı arar (TÜRKİYE FİNANS KATILIM BANKASI A.Ş. dahil).
+    Sayıları etiket bazlı (Genel Limit, Nakit Risk, G.N.Risk) yakalar; yoksa sırayla atar.
+    """
+    if not text or not text.strip():
+        return []
+    text_clean = text.replace("\r", "\n").strip()
+    text_norm = _tr_lower(text_clean)
+    records: List[Dict] = []
+    # Normalize metinde banka eşleşmeleri (case + Türkçe karakter güvencesi)
+    for m in _BI_BANK_NAME_NORM_RE.finditer(text_norm):
+        raw_name = text_clean[m.start() : m.end()]
+        bank_name = _normalize_bank_name(raw_name)
+        if len(bank_name) < 4:
+            continue
+        start = m.end()
+        next_bank = _BI_BANK_NAME_NORM_RE.search(text_norm, start)
+        hard_end = min(
+            next_bank.start() if next_bank else len(text_norm),
+            start + 2000,
+            len(text_norm),
+        )
+        # 2–3 para sayısı bulunana kadar blok genişlet (en fazla 2000 karakter)
+        block_end = min(start + 500, hard_end)
+        block = text_clean[start:block_end]
+        block_norm = text_norm[start:block_end]
+        for _ in range(4):
+            nums_in_block = [
+                float(_parse_number(g))
+                for g in _BI_TEXT_NUMBER_RE.findall(block)
+                if _parse_number(g) is not None and not _DATE_RE.fullmatch(g)
+            ]
+            if len(nums_in_block) >= 2 or block_end >= hard_end:
+                break
+            block_end = min(block_end + 500, hard_end)
+            block = text_clean[start:block_end]
+            block_norm = text_norm[start:block_end]
+        # Etiket bazlı sayıları al
+        genel_v = None
+        nakit_v = None
+        gn_v = None
+        for lab_re, slot in (
+            (_BI_LABEL_GENEL, "genel"),
+            (_BI_LABEL_NAKIT, "nakit"),
+            (_BI_LABEL_GN, "gn"),
+        ):
+            lab_m = lab_re.search(block_norm)
+            if lab_m:
+                v = _parse_number(lab_m.group(1))
+                if v is not None:
+                    if slot == "genel":
+                        genel_v = float(v)
+                    elif slot == "nakit":
+                        nakit_v = float(v)
+                    else:
+                        gn_v = float(v)
+        # Son çare: sırayla sayı listesi
+        nums: List[float] = []
+        for num_m in _BI_TEXT_NUMBER_RE.finditer(block):
+            s = num_m.group(0)
+            if _DATE_RE.fullmatch(s):
+                continue
+            v = _parse_number(s)
+            if v is not None:
+                nums.append(float(v))
+        if genel_v is None and len(nums) >= 1:
+            genel_v = nums[0]
+        if nakit_v is None and len(nums) >= 2:
+            nakit_v = nums[1]
+        if gn_v is None and len(nums) >= 3:
+            gn_v = nums[2]
+        firma = ""
+        for known in _BI_FIRMA_KNOWN:
+            if known in block:
+                firma = known
+                break
+        status = ""
+        if "OLUMLU" in block.upper():
+            status = "OLUMLU"
+        elif "OLUMSUZ" in block.upper():
+            status = "OLUMSUZ"
+        dates = _DATE_RE.findall(block)
+        istih_tarihi = dates[0] if dates else ""
+        revize_tarihi = dates[1] if len(dates) > 1 else ""
+        rec = {
+            "bank_name": bank_name,
+            "group_or_firm": firma,
+            "genel_limit": _money(genel_v, "TRY"),
+            "nakit_risk": _money(nakit_v, "TRY"),
+            "gn_risk": _money(gn_v, "TRY"),
+            "d_kd": _money(None, "TRY"),
+            "istih_tarihi": istih_tarihi,
+            "revize_tarihi": revize_tarihi,
+            "status": status,
+            "teminat_sarti": "",
+            "notes": [],
+        }
+        if rec["genel_limit"].get("value") is not None or rec["nakit_risk"].get("value") is not None:
+            records.append(rec)
+    # Fallback tetiklenip parse çalışınca log: kaç banka, kaç record, ilk 1-2 preview
+    banks_found = sum(
+        1
+        for m in _BI_BANK_NAME_NORM_RE.finditer(text_norm)
+        if len(_normalize_bank_name(text_clean[m.start() : m.end()])) >= 4
+    )
+    preview = [
+        {
+            "bank_name": r["bank_name"],
+            "group_or_firm": r.get("group_or_firm"),
+            "genel_limit": r["genel_limit"],
+            "nakit_risk": r["nakit_risk"],
+            "gn_risk": r["gn_risk"],
+        }
+        for r in records[:2]
+    ]
+    logger.info(
+        "BI text fallback parse: page=%s, banks_found=%s, records_produced=%s, preview=%s",
+        page_num,
+        banks_found,
+        len(records),
+        preview,
+    )
+    return records
+
+
 # ---------------------------------------------------------------------------
 # Main extractor class
 # ---------------------------------------------------------------------------
@@ -674,6 +840,37 @@ class CreditIntelligencePDFExtractor:
 
         if current_rec:
             records.append(current_rec)
+
+        # Text fallback: tablolar boş/eksik veya beklenen satırlar (Türkiye Finans, 391.263) yoksa
+        records_str = str(records)
+        need_text_fallback = (
+            not records
+            or ("Türkiye Finans" not in records_str and "391.263" not in records_str)
+        )
+        if need_text_fallback:
+            logger.info(
+                "BI text fallback triggered: tables empty or missing expected content (e.g. Türkiye Finans / 391.263)"
+            )
+            existing_keys = {(r.get("bank_name"), r.get("group_or_firm", "")) for r in records}
+            for pd in pages:
+                text = (
+                    getattr(pd, "free_text", None)
+                    or getattr(pd, "raw_text", None)
+                    or getattr(pd, "page_text", None)
+                )
+                if not (text and str(text).strip()):
+                    logger.warning(
+                        "BI text fallback: page %s has no free_text/raw_text/page_text — skip",
+                        getattr(pd, "page_num", "?"),
+                    )
+                    continue
+                text_recs = _parse_banka_istihbarati_from_text(text, pd.page_num)
+                for rec in text_recs:
+                    key = (rec.get("bank_name"), rec.get("group_or_firm", ""))
+                    if key not in existing_keys:
+                        rec["source_pages"] = source_pages
+                        records.append(rec)
+                        existing_keys.add(key)
 
         return records
 
