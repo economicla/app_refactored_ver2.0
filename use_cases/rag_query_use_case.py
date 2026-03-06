@@ -6,7 +6,7 @@ Advanced preprocessing, intelligent chunking, source tracking ve compliance
 
 import logging
 import re
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -330,6 +330,84 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         if any(x in n for x in ("TOPLAM", "GNAKDI", "LEASING", "AKREDİTİF", "UMUMI", "NAKDİ", "GN ", "TL", "YP", "KOD")):
             return False
         return False
+
+    # DB'den çekilen BI içeriklerinden satır parse et (deterministik tablo için)
+    _BI_ROW_RE = re.compile(
+        r"Banka:\s*(?P<bank>[^|]+)\s*\|\s*Firma:\s*(?P<firm>[^|]*)\s*\|\s*Genel Limit:\s*(?P<genel>[0-9,\-\s]+?)\s*TRY\s*\|\s*Nakit Risk:\s*(?P<nakit>[0-9,\-\s]+?)\s*TRY\s*\|\s*G\.Nakdi Risk:\s*(?P<gn>[0-9,\-\s]+?)\s*TRY",
+        re.IGNORECASE,
+    )
+
+    def _parse_bi_rows_from_contents(
+        self, contents: List[Dict[str, str]]
+    ) -> List[Dict[str, Any]]:
+        """
+        get_bi_lines ile alınan content listesinden BI satırlarını regex ile çıkar.
+        bank+firm uniq yapılır; genel/nakit/gn sayılar int'e çevrilir.
+        """
+        seen: set = set()
+        rows: List[Dict] = []
+        for item in contents:
+            content = item.get("content") or ""
+            for m in self._BI_ROW_RE.finditer(content):
+                bank = (m.group("bank") or "").strip()
+                firm = (m.group("firm") or "").strip()
+                genel_s = (m.group("genel") or "").strip().replace(" ", "")
+                nakit_s = (m.group("nakit") or "").strip().replace(" ", "")
+                gn_s = (m.group("gn") or "").strip().replace(" ", "")
+
+                def _to_int(s: str) -> int:
+                    if not s or s == "-":
+                        return 0
+                    try:
+                        return int(s.replace(",", ""))
+                    except ValueError:
+                        return 0
+
+                genel = _to_int(genel_s)
+                nakit = _to_int(nakit_s)
+                gn = _to_int(gn_s)
+                key = (bank, firm)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({
+                    "bank": bank,
+                    "firm": firm,
+                    "genel_limit": genel,
+                    "nakit_risk": nakit,
+                    "gn_risk": gn,
+                })
+        return rows
+
+    def _format_bi_table_deterministic(
+        self, rows: List[Dict], include_totals: bool = True
+    ) -> str:
+        """BI satırlarından markdown tablo + toplamlar üret."""
+        if not rows:
+            return ""
+        lines = [
+            "| BANKA | FİRMA | GENEL LİMİT (TRY) | NAKİT RİSK (TRY) | G.NAKDİ RİSK (TRY) |",
+            "|-------|-------|-------------------|------------------|---------------------|",
+        ]
+        total_genel = total_nakit = total_gn = 0
+        for r in rows:
+            g = r.get("genel_limit", 0) or 0
+            n = r.get("nakit_risk", 0) or 0
+            gn = r.get("gn_risk", 0) or 0
+            total_genel += g
+            total_nakit += n
+            total_gn += gn
+            lines.append(
+                f"| {r.get('bank', '')} | {r.get('firm', '')} | {g:,} | {n:,} | {gn:,} |"
+            )
+        table = "\n".join(lines)
+        if include_totals and rows:
+            table += (
+                f"\n\n**Toplam Genel Limit:** {total_genel:,} TRY  \n"
+                f"**Toplam Nakit Risk:** {total_nakit:,} TRY  \n"
+                f"**Toplam G.Nakdi Risk:** {total_gn:,} TRY"
+            )
+        return table
 
     def _extract_bank_table_from_context(self, context: str) -> Tuple[List[Dict], str]:
         """
@@ -1457,6 +1535,56 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     user_id=query.user_id,
                     debug_info=debug_info
                 )
+
+            # Deterministik BI tablosu: diğer bankalarda limit/risk veya EXTERNAL_BANK ise DB'den BI satırlarını topla
+            routing = debug_info.get("routing_decision") or {}
+            is_external_bank = routing.get("matched_rule_id") == "EXTERNAL_BANK"
+            use_deterministic_bi = (
+                (is_bi or is_external_bank)
+                and hasattr(self.document_repository, "get_bi_lines")
+            )
+            if use_deterministic_bi:
+                try:
+                    get_bi_lines = getattr(self.document_repository, "get_bi_lines")
+                    preferred_filename = getattr(reranked_docs[0], "filename", None) if reranked_docs else None
+                    bi_chunks = await get_bi_lines(
+                        filename=preferred_filename,
+                        doc_type="İstihbarat Raporu",
+                    )
+                    if not bi_chunks and preferred_filename is None:
+                        bi_chunks = await get_bi_lines(filename=None, doc_type="İstihbarat Raporu")
+                    bi_rows = self._parse_bi_rows_from_contents(bi_chunks)
+                    if bi_rows:
+                        table_md = self._format_bi_table_deterministic(bi_rows)
+                        answer = "**Banka İstihbaratı bölümünden:**\n\n" + table_md
+                        debug_info["bi_deterministic"] = {
+                            "rows": len(bi_rows),
+                            "filename": preferred_filename,
+                        }
+                        sources_bi = [
+                            SourceWithMetadata(
+                                filename=getattr(d, "filename", ""),
+                                chunk_index=getattr(d, "chunk_index", 0),
+                                header=None,
+                                similarity_score=getattr(d, "similarity_score", 0),
+                                content_preview=(getattr(d, "content", "") or "")[:150],
+                                chunk_size=len(getattr(d, "content", "") or ""),
+                            )
+                            for d in reranked_docs[:5]
+                        ]
+                        logger.info(f"📊 Deterministik BI tablosu: {len(bi_rows)} satır (LLM atlandı)")
+                        return RAGResponse(
+                            question=query.query,
+                            answer=answer,
+                            sources=sources_bi,
+                            model=await self.llm_service.get_model_name(),
+                            timestamp=datetime.utcnow(),
+                            user_id=query.user_id,
+                            debug_info=debug_info,
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ Deterministik BI toplama hatası, LLM yoluna düşülüyor: {e}")
+                    debug_info.setdefault("bi_deterministic", {})["error"] = str(e)
 
             # Step 2.5: Entity-aware chunk focusing
             entity_keywords = self._extract_entity_keywords(query.query)
