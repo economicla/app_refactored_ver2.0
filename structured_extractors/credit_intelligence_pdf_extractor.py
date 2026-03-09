@@ -529,8 +529,8 @@ _MEMZUC_DOLULUK_ROW_NAMES = (
 )
 # Satır gruplama: aynı y'ye yakın kelimeler aynı satır (tolerance pt)
 _MEMZUC_ROW_Y_TOLERANCE = 4
-# Crop A: ANA FİRMA DAHİL tablosu (header_top .. header_top+320) — Toplam Nakdi/GN satırları kesin içerde
-_MEMZUC_CROP_A_HEIGHT = 320
+# Crop A: ANA FİRMA DAHİL tablosu — tüm doluluk satırları (Toplam Nakdi/GN, TOPLAM, Umumi Limit) burada
+_MEMZUC_CROP_A_HEIGHT = 420
 # Crop B: üst özet bandı max sayfa yüksekliğinin %30'u ile sınırlı
 _MEMZUC_CROP_B_MAX_FRAC = 0.30
 _MEMZUC_CROP_B_ABOVE_HEADER = 10
@@ -551,9 +551,9 @@ _MEMZUC_HEADER_PATTERNS = (
     "KREDİ GRUBU FİRMA MEMZUÇLARI",
     "ANA FİRMA DAHİL",
 )
-# Crop A'dan sadece bu iki kalem
-_CROP_A_ROW_NAMES = ("Toplam Nakdi Kredi", "Toplam GN Kredi")
-# Crop B'den sadece bu iki kalem (üst özet: TOPLAM, Umumi Limit)
+# Crop A: ana tablodan dört kalemin hepsi (doğru Doluluk Oranı sütunu burada)
+_CROP_A_ROW_NAMES = ("Umumi Limit", "Toplam Nakdi Kredi", "Toplam GN Kredi", "TOPLAM")
+# Crop B: üst özet bandı — aynı kalemler farklı sayılara sahip; Crop A öncelikli (merge'de max alınır)
 _CROP_B_ROW_NAMES = ("TOPLAM", "Umumi Limit")
 _DEFAULT_MEMZUC_PERIOD = "2025/12"
 
