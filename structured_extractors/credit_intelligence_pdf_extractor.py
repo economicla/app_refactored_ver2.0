@@ -558,6 +558,8 @@ _MEMZUC_HEADER_PATTERNS = (
 _CROP_A_ROW_NAMES = ("Umumi Limit", "Toplam Nakdi Kredi", "Toplam GN Kredi", "TOPLAM")
 # Crop B: üst özet bandı — aynı kalemler farklı sayılara sahip; Crop A öncelikli (merge'de max alınır)
 _CROP_B_ROW_NAMES = ("TOPLAM", "Umumi Limit")
+# Devam sayfası: tablo sayfa sonunda kesilirse TOPLAM/Umumi Limit sonraki sayfanın üstünde olabilir
+_MEMZUC_CONTINUATION_CROP_HEIGHT = 280
 _DEFAULT_MEMZUC_PERIOD = "2025/12"
 
 
@@ -851,6 +853,34 @@ def _memzuc_doluluk_from_tables(
     return out
 
 
+def _extract_memzuc_continuation_page(
+    page, period: str, page_num: int
+) -> List[str]:
+    """
+    Tablo önceki sayfada kesildiyse (header ~sayfa sonunda) TOPLAM ve Umumi Limit
+    sonraki sayfanın üstünde olabilir. Bu sayfadan sadece bu iki kalemi oku.
+    """
+    lines_out: List[str] = []
+    try:
+        words = page.extract_words() or []
+    except Exception:
+        return lines_out
+    if not words:
+        return lines_out
+    page_width = getattr(page, "width", 612)
+    crop = (0, 0, page_width, _MEMZUC_CONTINUATION_CROP_HEIGHT)
+    try:
+        cropped = page.crop(crop)
+        words = cropped.extract_words() or []
+    except Exception:
+        return lines_out
+    for _p, rn, doluluk in _parse_memzuc_crop(
+        words, _CROP_B_ROW_NAMES, period, "continuation", doluluk_band_x0=None
+    ):
+        lines_out.append(f"MEMZUC_DOLULUK | dönem: {period} | kalem: {rn} | doluluk: {doluluk}")
+    return lines_out
+
+
 def _extract_memzuc_doluluk_from_page_words(
     page, page_num: int
 ) -> Tuple[List[str], Dict[str, Any], Optional[str]]:
@@ -1112,6 +1142,31 @@ class CreditIntelligencePDFExtractor:
                             memzuc_lines_from_words.extend(word_lines)
                             if cropb_debug_line:
                                 last_cropb_debug_line = cropb_debug_line
+                            # Tablo sayfa sonunda kesildiyse (bbox_bottom ~ sayfa yüksekliği) TOPLAM/Umumi Limit sonraki sayfada olabilir
+                            if (
+                                len(word_lines) < 4
+                                and page_num < total_pages
+                                and page_debug.get("memzuc_bbox_bottom") is not None
+                            ):
+                                try:
+                                    next_page = pdf.pages[page_num]
+                                    period = (
+                                        (page_debug.get("periods_found") or [_DEFAULT_MEMZUC_PERIOD])[0]
+                                        if page_debug.get("periods_found")
+                                        else _DEFAULT_MEMZUC_PERIOD
+                                    )
+                                    cont_lines = _extract_memzuc_continuation_page(
+                                        next_page, period, page_num + 1
+                                    )
+                                    if cont_lines:
+                                        memzuc_lines_from_words.extend(cont_lines)
+                                        logger.info(
+                                            "Memzuc devam sayfası %s: +%s satır (TOPLAM/Umumi Limit)",
+                                            page_num + 1,
+                                            len(cont_lines),
+                                        )
+                                except Exception as e:
+                                    logger.debug("Memzuc devam sayfası %s: %s", page_num + 1, e)
                             memzuc_words_debug = {
                                 "words_parser_used": True,
                                 "doluluk_x0": page_debug.get("doluluk_x0"),
