@@ -418,28 +418,44 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         "TOPLAM",
     )
 
+    _MEMZUC_DOLULUK_LINE_RE = re.compile(
+        r"MEMZUC_DOLULUK\s*\|\s*dönem:\s*(\S+)\s*\|\s*kalem:\s*([^|]+?)\s*\|\s*doluluk:\s*(\d+)",
+        re.IGNORECASE,
+    )
+
     def _parse_memzuc_doluluk_from_contents(
         self, contents: List[Dict[str, str]]
     ) -> Dict[str, Dict[str, int]]:
         """
         get_memzuc_lines ile alınan content'lerden dönem bazlı doluluk oranlarını çıkar.
-        Dönem başlığı 20xx/xx; her dönem bloğunda Umumi Limit, Toplam Nakdi Kredi, Toplam GN Kredi, TOPLAM
-        satırlarında satır sonundaki yüzde (1-2 rakam) yakalanır.
+        Önce MEMZUC_DOLULUK | dönem: X | kalem: Y | doluluk: Z formatını parse eder;
+        yoksa dönem bloğu + satır adı + satır sonu yüzde ile parse eder.
         Returns: { "2025/12": {"Umumi Limit": 20, "Toplam Nakdi Kredi": 25, ...}, ... }
         """
         combined = "\n".join((item.get("content") or "").replace("\r", "\n") for item in contents)
         if not combined.strip():
             return {}
-        # Dönemleri bul; her dönem için bloğu al (sonraki döneme kadar veya sonu)
-        period_positions = list(self._MEMZUC_PERIOD_RE.finditer(combined))
         result: Dict[str, Dict[str, int]] = {}
+        # 1) Structured format: MEMZUC_DOLULUK | dönem: 2025/12 | kalem: Umumi Limit | doluluk: 20
+        for m in self._MEMZUC_DOLULUK_LINE_RE.finditer(combined):
+            period_norm = (m.group(1) or "").strip().replace(" ", "")
+            kalem = (m.group(2) or "").strip()
+            try:
+                pct = int((m.group(3) or "").strip())
+            except ValueError:
+                continue
+            if period_norm and kalem:
+                result.setdefault(period_norm, {})[kalem] = pct
+        if result:
+            return result
+        # 2) Fallback: dönem başlığı + blok içinde satır adı + satır sonu yüzde
+        period_positions = list(self._MEMZUC_PERIOD_RE.finditer(combined))
         for i, m in enumerate(period_positions):
             period_raw = (m.group("period") or "").strip()
-            period_norm = period_raw.replace(" ", "")  # "2025/12"
+            period_norm = period_raw.replace(" ", "")
             start = m.end()
             end = period_positions[i + 1].start() if i + 1 < len(period_positions) else len(combined)
             block = combined[start:end]
-            row_pcts: Dict[str, int] = {}
             for line in block.splitlines():
                 line_clean = line.strip()
                 if not line_clean:
@@ -447,16 +463,13 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 line_lower = line_clean.lower()
                 for row_name in self._MEMZUC_ROW_NAMES:
                     if row_name.lower() in line_lower:
-                        # Satır sonundaki yüzde (1-2 rakam)
                         pct_m = re.search(r"\d{1,2}\s*$", line_clean)
                         if pct_m:
                             try:
-                                row_pcts[row_name] = int(pct_m.group(0).strip())
+                                result.setdefault(period_norm, {})[row_name] = int(pct_m.group(0).strip())
                             except ValueError:
                                 pass
                         break
-            if row_pcts:
-                result[period_norm] = row_pcts
         return result
 
     def _extract_requested_period_from_query(self, query: str) -> Optional[str]:
@@ -470,21 +483,15 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         self, requested: Optional[str], periods_found: List[str]
     ) -> Tuple[Optional[str], bool]:
         """
-        İstenen dönem varsa onu döndür; yoksa raporda mevcut en yakın dönemi seç.
+        İstenen dönem raporda varsa onu seç; yoksa en güncel dönemi seç (max YYYY/MM).
         Returns: (selected_period, exact_match).
         """
         if not periods_found:
             return None, False
         if requested and requested in periods_found:
             return requested, True
-        # Sıralı listeyi al (2024/12, 2025/12 vb.) ve en güncel veya istenene en yakını seç
-        sorted_periods = sorted(periods_found)
-        if requested:
-            # İstenen dönemden sonra gelen ilk mevcut dönem (veya son dönem)
-            for p in sorted_periods:
-                if p >= requested:
-                    return p, False
-        return sorted_periods[-1], False
+        # İstenen dönem yoksa en güncel dönem (2025/12 varken 2024/12 seçilmesin)
+        return max(periods_found), False
 
     def _format_memzuc_doluluk_response(
         self,
@@ -493,7 +500,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         requested_period: Optional[str],
         exact_match: bool,
     ) -> str:
-        """Memzuc doluluk oranları için kısa tablo + açıklama."""
+        """Memzuc doluluk oranları: 4 kalem (Umumi Limit, Toplam Nakdi Kredi, Toplam GN Kredi, TOPLAM)."""
         if not period_data:
             return "Raporda bu dönem için doluluk oranı verisi bulunamadı."
         lines = [
@@ -503,13 +510,12 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             "|-------|-------------------|",
         ]
         for row_name in self._MEMZUC_ROW_NAMES:
-            if row_name in period_data:
-                lines.append(f"| {row_name} | {period_data[row_name]} |")
+            val = period_data.get(row_name)
+            lines.append(f"| {row_name} | {val if val is not None else '-'} |")
         body = "\n".join(lines)
         if not exact_match and requested_period:
             body = (
-                f"*Not: Raporda {requested_period} dönemi bulunmadığı için "
-                f"mevcut en yakın dönem olan **{period_label}** gösterilmektedir.*\n\n"
+                f"*Raporda {requested_period} dönemi bulunamadı; en güncel dönem olan **{period_label}** gösteriliyor.*\n\n"
                 + body
             )
         return body
@@ -1691,13 +1697,14 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     logger.warning(f"⚠️ Deterministik BI toplama hatası, LLM yoluna düşülüyor: {e}")
                     debug_info.setdefault("bi_deterministic", {})["error"] = str(e)
 
-            # Deterministik Memzuc Doluluk Oranı: memzuc / doluluk oranı / grup memzucu sorularında DB'den parse
+            # Deterministik Memzuc Doluluk: sorguda memzuc/doluluk/memzuculuk geçiyorsa veya routing MEMZUC ise zorla çalıştır
             routing_m = debug_info.get("routing_decision") or {}
             q_lo = query.query.lower()
+            _MEMZUC_TRIGGER_KEYWORDS = (
+                "memzuç", "memzuc", "doluluk", "kredi grubu memzuculuk", "memzuculuk",
+            )
             is_memzuc_query = (
-                "memzuc" in q_lo
-                or "doluluk oranı" in q_lo
-                or "grup memzucu" in q_lo
+                any(kw in q_lo for kw in _MEMZUC_TRIGGER_KEYWORDS)
                 or routing_m.get("matched_rule_id") == "MEMZUC"
             )
             if is_memzuc_query and hasattr(self.document_repository, "get_memzuc_lines"):
@@ -1724,9 +1731,12 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                             requested_period,
                             exact_match,
                         )
+                        row_count = len(period_data)
                         debug_info["memzuc_deterministic"] = True
                         debug_info["memzuc_periods_found"] = periods_found
+                        debug_info["memzuc_requested_period"] = requested_period
                         debug_info["memzuc_selected_period"] = selected_period
+                        debug_info["memzuc_row_count"] = row_count
                         sources_memzuc = [
                             SourceWithMetadata(
                                 filename=getattr(d, "filename", ""),
@@ -1740,7 +1750,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                         ]
                         logger.info(
                             f"📊 Deterministik Memzuc doluluk: selected_period={selected_period}, "
-                            f"periods_found={periods_found} (LLM atlandı)"
+                            f"periods_found={periods_found}, row_count={row_count} (LLM atlandı)"
                         )
                         return RAGResponse(
                             question=query.query,
@@ -1755,6 +1765,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     logger.warning(
                         f"⚠️ Deterministik Memzuc toplama hatası, LLM yoluna düşülüyor: {e}"
                     )
+                    debug_info["memzuc_error"] = str(e)
                     debug_info.setdefault("memzuc_deterministic", {})["error"] = str(e)
 
             # Step 2.5: Entity-aware chunk focusing
