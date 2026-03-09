@@ -534,8 +534,13 @@ _MEMZUC_CROP_A_HEIGHT = 320
 # Crop B: üst özet bandı max sayfa yüksekliğinin %30'u ile sınırlı
 _MEMZUC_CROP_B_MAX_FRAC = 0.30
 _MEMZUC_CROP_B_ABOVE_HEADER = 10
-# Crop B'de doluluk_x0 arama kaldırıldı; doluluk sütunu sağ bant ile: width * ratio (0.85 veya 0.82)
-_CROP_B_DOLULUK_BAND_RATIO = 0.85
+# Crop B: doluluk sütunu sağ bant width * ratio (0.70 test; 0.85 hâlâ 2/7 veriyorsa bbox sorunu)
+_CROP_B_DOLULUK_BAND_RATIO = 0.70
+# True ise Crop B/A header_top'tan bağımsız: B = üst %25, A = %25..%70 (yanlış header_top için)
+_MEMZUC_USE_PERCENTAGE_CROPS = False
+_MEMZUC_CROP_B_TOP_FRAC = 0.25
+_MEMZUC_CROP_A_TOP_FRAC = 0.25
+_MEMZUC_CROP_A_BOTTOM_FRAC = 0.70
 # Başlık: sadece bu bulunursa words parser çalışır
 _MEMZUC_HEADER_FOR_CROP = (
     "KREDİ GRUBU FİRMA MEMZUCULARI",
@@ -767,13 +772,41 @@ def _parse_memzuc_crop(
     return out
 
 
+def _build_cropb_debug_line(
+    words_b: List[Dict],
+    header_top: float,
+    page_width: float,
+    crop_b_bottom: float,
+    band_x0: float,
+) -> str:
+    """Crop B içinde x0 >= band_x0 olan numeric (0-100) tokenların ilk 20'si; bbox/band ayrımı için."""
+    tokens: List[str] = []
+    for w in sorted(words_b, key=lambda x: float(x.get("x0", 0))):
+        x0 = float(w.get("x0", 0))
+        if x0 < band_x0:
+            continue
+        t = (w.get("text") or "").strip().replace(" ", "")
+        try:
+            n = int(t)
+            if 0 <= n <= 100:
+                tokens.append(str(n))
+                if len(tokens) >= 20:
+                    break
+        except ValueError:
+            continue
+    return (
+        f"MEMZUC_CROPB_DEBUG | header_top={header_top:.1f} | bboxB=(0,0,{page_width:.0f},{crop_b_bottom:.1f}) | "
+        f"band_x0={band_x0:.1f} | tokens={','.join(tokens)}"
+    )
+
+
 def _extract_memzuc_doluluk_from_page_words(
     page, page_num: int
-) -> Tuple[List[str], Dict[str, Any]]:
+) -> Tuple[List[str], Dict[str, Any], Optional[str]]:
     """
-    MEMZUC_DOLULUK üretimini iki crop alanına kısıtlar. Dönem crop içinden aranmaz;
-    sayfa full_text'inden max(20xx/yy) sabitlenir (yoksa 2025/12).
-    Crop A: header_top .. header_top+320 — Toplam Nakdi/GN. Crop B: üst band (header_top-10 veya max %30).
+    MEMZUC_DOLULUK üretimini iki crop alanına kısıtlar. Dönem sayfa full_text max(20xx/yy).
+    Crop A: header_top+320 veya (h*0.25..h*0.70). Crop B: üst band veya h*0.25.
+    Returns: (lines_out, debug_out, cropb_debug_line).
     """
     empty_debug: Dict[str, Any] = {
         "doluluk_x0": None,
@@ -786,53 +819,78 @@ def _extract_memzuc_doluluk_from_page_words(
         full_words = page.extract_words() or []
     except Exception as e:
         logger.debug("Memzuc words extract page %s: %s", page_num, e)
-        return [], empty_debug
+        return [], empty_debug, None
     if not full_words:
-        return [], empty_debug
+        return [], empty_debug, None
 
     header_top = _find_memzuc_header_top(full_words)
-    if header_top is None:
-        logger.debug("Memzuc header KREDİ GRUBU FİRMA MEMZUCULARI not found on page %s", page_num)
-        return [], empty_debug
-
-    # Dönem: sayfa full_text'inden max(20xx/yy); crop içinden arama yok (yanlış dönem 10/13 önlenir)
-    period = _period_from_page_text(page)
-
     page_width = getattr(page, "width", 612)
     page_height = getattr(page, "height", 792)
+    period = _period_from_page_text(page)
     all_results: List[Tuple[str, str, int]] = []
+    cropb_debug_line: Optional[str] = None
 
-    # Crop A: (0, header_top, page.width, header_top + 320) — sadece Toplam Nakdi, Toplam GN
-    try:
-        crop_a = page.crop((0, header_top, page_width, header_top + _MEMZUC_CROP_A_HEIGHT))
-        words_a = crop_a.extract_words() or []
-    except Exception as e:
-        logger.debug("Memzuc crop A page %s: %s", page_num, e)
-        words_a = []
+    crop_b_bottom_val: float = 0.0
+    if _MEMZUC_USE_PERCENTAGE_CROPS:
+        # Crop B = üst %25, Crop A = %25..%70 (header_top yanlışsa bu mod)
+        crop_b_bottom_val = page_height * _MEMZUC_CROP_B_TOP_FRAC
+        crop_a_top = page_height * _MEMZUC_CROP_A_TOP_FRAC
+        crop_a_bottom = page_height * _MEMZUC_CROP_A_BOTTOM_FRAC
+        try:
+            crop_b = page.crop((0, 0, page_width, crop_b_bottom_val))
+            words_b = crop_b.extract_words() or []
+        except Exception as e:
+            logger.debug("Memzuc crop B (pct) page %s: %s", page_num, e)
+            words_b = []
+        try:
+            crop_a = page.crop((0, crop_a_top, page_width, crop_a_bottom))
+            words_a = crop_a.extract_words() or []
+        except Exception as e:
+            logger.debug("Memzuc crop A (pct) page %s: %s", page_num, e)
+            words_a = []
+        end_crop_a = crop_a_bottom
+    else:
+        if header_top is None:
+            logger.debug("Memzuc header KREDİ GRUBU FİRMA MEMZUCULARI not found on page %s", page_num)
+            return [], empty_debug, None
+        # Crop A: (0, header_top, w, header_top + 320)
+        try:
+            crop_a = page.crop((0, header_top, page_width, header_top + _MEMZUC_CROP_A_HEIGHT))
+            words_a = crop_a.extract_words() or []
+        except Exception as e:
+            logger.debug("Memzuc crop A page %s: %s", page_num, e)
+            words_a = []
+        end_crop_a = header_top + _MEMZUC_CROP_A_HEIGHT
+        # Crop B: (0, 0, w, min(header_top-10, h*0.30))
+        crop_b_bottom_val = min(
+            max(0.0, header_top - _MEMZUC_CROP_B_ABOVE_HEADER),
+            page_height * _MEMZUC_CROP_B_MAX_FRAC,
+        )
+        try:
+            crop_b = page.crop((0, 0, page_width, crop_b_bottom_val))
+            words_b = crop_b.extract_words() or []
+        except Exception as e:
+            logger.debug("Memzuc crop B page %s: %s", page_num, e)
+            words_b = []
+
     if words_a:
         for t in _parse_memzuc_crop(words_a, _CROP_A_ROW_NAMES, period, "A"):
             all_results.append(t)
-    end_crop_a = header_top + _MEMZUC_CROP_A_HEIGHT
 
-    # Crop B: üst özet bandı — (0, 0, page.width, min(header_top-10, page.height*0.30))
-    crop_b_bottom = min(
-        max(0.0, header_top - _MEMZUC_CROP_B_ABOVE_HEADER),
-        page_height * _MEMZUC_CROP_B_MAX_FRAC,
-    )
-    try:
-        crop_b = page.crop((0, 0, page_width, crop_b_bottom))
-        words_b = crop_b.extract_words() or []
-    except Exception as e:
-        logger.debug("Memzuc crop B page %s: %s", page_num, e)
-        words_b = []
+    doluluk_band_x0_b = page_width * _CROP_B_DOLULUK_BAND_RATIO
     if words_b:
-        doluluk_band_x0_b = page_width * _CROP_B_DOLULUK_BAND_RATIO
         for t in _parse_memzuc_crop(
             words_b, _CROP_B_ROW_NAMES, period, "B", doluluk_band_x0=doluluk_band_x0_b
         ):
             all_results.append(t)
+        cropb_debug_line = _build_cropb_debug_line(
+            words_b,
+            header_top if header_top is not None else 0.0,
+            page_width,
+            crop_b_bottom_val,
+            doluluk_band_x0_b,
+        )
 
-    # (period, row_name) -> max doluluk (aynı kalem iki crop'tan gelirse)
     merged: Dict[Tuple[str, str], int] = {}
     for p, row_name, doluluk in all_results:
         key = (p, row_name)
@@ -849,7 +907,7 @@ def _extract_memzuc_doluluk_from_page_words(
         "memzuc_bbox_top": header_top,
         "memzuc_bbox_bottom": end_crop_a,
     }
-    return lines_out, debug_out
+    return lines_out, debug_out, cropb_debug_line
 
 
 def _page_has_memzuc_signal(free_text: Optional[str]) -> bool:
@@ -964,6 +1022,7 @@ class CreditIntelligencePDFExtractor:
         pages_data: List[_PageData] = []
         memzuc_lines_from_words: List[str] = []
         memzuc_words_debug: Dict[str, Any] = {}
+        last_cropb_debug_line: Optional[str] = None
 
         try:
             with pdfplumber.open(file_path) as pdf:
@@ -972,13 +1031,15 @@ class CreditIntelligencePDFExtractor:
                     pd = self._process_page(page, page_num, warnings)
                     pages_data.append(pd)
                     tables_per_page.append({"page": page_num, "count": pd.table_count})
-                    # Memzuc doluluk: gevşek sinyal ile words parser (Doluluk sütunu x0 referanslı)
+                    # Memzuc doluluk: başlık sinyali ile words parser (Crop A/B)
                     if _page_has_memzuc_signal(pd.free_text):
-                        word_lines, page_debug = _extract_memzuc_doluluk_from_page_words(
+                        word_lines, page_debug, cropb_debug_line = _extract_memzuc_doluluk_from_page_words(
                             page, page_num
                         )
                         if word_lines:
                             memzuc_lines_from_words.extend(word_lines)
+                            if cropb_debug_line:
+                                last_cropb_debug_line = cropb_debug_line
                             memzuc_words_debug = {
                                 "words_parser_used": True,
                                 "doluluk_x0": page_debug.get("doluluk_x0"),
@@ -1024,6 +1085,8 @@ class CreditIntelligencePDFExtractor:
                     before_merge,
                     len(memzuc_fallback),
                 )
+            if last_cropb_debug_line:
+                memzuc_fallback.append(last_cropb_debug_line)
             sections["memzuc_doluluk_fallback"] = memzuc_fallback
             if memzuc_words_debug:
                 memzuc_words_debug["extracted_rows_count"] = len(memzuc_fallback)
