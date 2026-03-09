@@ -530,7 +530,7 @@ _MEMZUC_DOLULUK_ROW_NAMES = (
 # Satır gruplama: aynı y'ye yakın kelimeler aynı satır (tolerance pt)
 _MEMZUC_ROW_Y_TOLERANCE = 4
 # Crop A: ANA FİRMA DAHİL tablosu — tüm doluluk satırları (Toplam Nakdi/GN, TOPLAM, Umumi Limit) burada
-_MEMZUC_CROP_A_HEIGHT = 420
+_MEMZUC_CROP_A_HEIGHT = 580
 # Crop B: üst özet bandı max sayfa yüksekliğinin %30'u ile sınırlı
 _MEMZUC_CROP_B_MAX_FRAC = 0.30
 _MEMZUC_CROP_B_ABOVE_HEADER = 10
@@ -541,10 +541,13 @@ _MEMZUC_USE_PERCENTAGE_CROPS = False
 _MEMZUC_CROP_B_TOP_FRAC = 0.25
 _MEMZUC_CROP_A_TOP_FRAC = 0.25
 _MEMZUC_CROP_A_BOTTOM_FRAC = 0.70
-# Başlık: sadece bu bulunursa words parser çalışır
+# Başlık: tam metin "KREDİ GRUBU FİRMA MEMZUÇLARI (ANA FİRMA DAHİL) (BankaSayisi: 9)" — bölünmüş satırda da bulunsun diye ANA FİRMA DAHİL de aranır
 _MEMZUC_HEADER_FOR_CROP = (
     "KREDİ GRUBU FİRMA MEMZUCULARI",
     "KREDİ GRUBU FİRMA MEMZUÇLARI",
+    "MEMZUÇLARI (ANA FİRMA DAHİL)",
+    "MEMZUCULARI (ANA FİRMA DAHİL)",
+    "ANA FİRMA DAHİL",
 )
 _MEMZUC_HEADER_PATTERNS = (
     "KREDİ GRUBU FİRMA MEMZUCULARI",
@@ -853,14 +856,15 @@ def _extract_memzuc_doluluk_from_page_words(
         if header_top is None:
             logger.debug("Memzuc header KREDİ GRUBU FİRMA MEMZUCULARI not found on page %s", page_num)
             return [], empty_debug, None
-        # Crop A: (0, header_top, w, header_top + 320)
+        # Crop A: ana tablo (TOPLAM, Umumi Limit dahil); sayfa sonunu aşmayacak şekilde
+        crop_a_bottom = min(header_top + _MEMZUC_CROP_A_HEIGHT, page_height)
         try:
-            crop_a = page.crop((0, header_top, page_width, header_top + _MEMZUC_CROP_A_HEIGHT))
+            crop_a = page.crop((0, header_top, page_width, crop_a_bottom))
             words_a = crop_a.extract_words() or []
         except Exception as e:
             logger.debug("Memzuc crop A page %s: %s", page_num, e)
             words_a = []
-        end_crop_a = header_top + _MEMZUC_CROP_A_HEIGHT
+        end_crop_a = crop_a_bottom
         # Crop B: (0, 0, w, min(header_top-10, h*0.30))
         crop_b_bottom_val = min(
             max(0.0, header_top - _MEMZUC_CROP_B_ABOVE_HEADER),
@@ -877,12 +881,14 @@ def _extract_memzuc_doluluk_from_page_words(
         for t in _parse_memzuc_crop(words_a, _CROP_A_ROW_NAMES, period, "A"):
             all_results.append(t)
 
+    # Crop B (üst özet bandı) devre dışı: özet 2/7/6 gibi yanlış değer veriyor; sadece ana tablo (Crop A) kullan
     doluluk_band_x0_b = page_width * _CROP_B_DOLULUK_BAND_RATIO
-    if words_b:
+    if words_b and False:  # Crop B kapatıldı
         for t in _parse_memzuc_crop(
             words_b, _CROP_B_ROW_NAMES, period, "B", doluluk_band_x0=doluluk_band_x0_b
         ):
             all_results.append(t)
+    if words_b:
         cropb_debug_line = _build_cropb_debug_line(
             words_b,
             header_top if header_top is not None else 0.0,
@@ -929,8 +935,8 @@ def _page_has_memzuc_signal(free_text: Optional[str]) -> bool:
 
 def _parse_memzuc_doluluk_from_text(text: str) -> List[str]:
     """
-    Metinde dönem (20xx/yy) bloklarını bulur; her blokta Umumi Limit, Toplam Nakdi Kredi,
-    Toplam GN Kredi, TOPLAM satırlarındaki son 1-2 haneli sayıyı doluluk oranı olarak alır.
+    Metinde dönem (20xx/yy) bloklarını bulur; her blokta her kalem için **son** eşleşen satırdaki
+    son 1-2 haneli sayıyı doluluk oranı olarak alır (özet tablosu yerine ana tablo satırı seçilir).
     Returns: ["MEMZUC_DOLULUK | dönem: 2025/12 | kalem: Umumi Limit | doluluk: 20", ...]
     """
     lines_out: List[str] = []
@@ -942,20 +948,21 @@ def _parse_memzuc_doluluk_from_text(text: str) -> List[str]:
         start = m.end()
         end = period_matches[i + 1].start() if i + 1 < len(period_matches) else len(normalized)
         block = normalized[start:end]
-        for line in block.splitlines():
-            line_clean = line.strip()
-            if not line_clean:
-                continue
-            line_lower = line_clean.lower()
-            for row_name in _MEMZUC_DOLULUK_ROW_NAMES:
-                if row_name.lower() in line_lower:
-                    nums = re.findall(r"\b\d{1,2}\b", line_clean)
-                    if nums:
-                        pct = nums[-1]
-                        lines_out.append(
-                            f"MEMZUC_DOLULUK | dönem: {period_norm} | kalem: {row_name} | doluluk: {pct}"
-                        )
-                    break
+        block_lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+        # Her kalem için bloktaki son eşleşen satırı al (özet satırı değil, ana tablo satırı)
+        for row_name in _MEMZUC_DOLULUK_ROW_NAMES:
+            row_lower = row_name.lower()
+            last_match_line: Optional[str] = None
+            for line in block_lines:
+                if row_lower in line.lower():
+                    last_match_line = line
+            if last_match_line:
+                nums = re.findall(r"\b\d{1,2}\b", last_match_line)
+                if nums:
+                    pct = nums[-1]
+                    lines_out.append(
+                        f"MEMZUC_DOLULUK | dönem: {period_norm} | kalem: {row_name} | doluluk: {pct}"
+                    )
     return lines_out
 
 
