@@ -180,6 +180,20 @@ class DocumentIngestionUseCase:
             f"{data['meta']['pages']} pages, "
             f"{len(data.get('debug', {}).get('section_hits', []))} sections detected"
         )
+        # Memzuc doluluk debug: ingest logunda görünsün (sorun giderme için)
+        debug = data.get("debug", {})
+        if debug.get("memzuc_words_parser"):
+            logger.info(
+                "📊 Memzuc doluluk (extractor debug): %s",
+                debug.get("memzuc_words_parser"),
+            )
+        memzuc_lines = (data.get("sections") or {}).get("memzuc_doluluk_fallback") or []
+        if memzuc_lines:
+            logger.info(
+                "📊 Memzuc doluluk satırları (%s): %s",
+                len(memzuc_lines),
+                [ln for ln in memzuc_lines if ln.startswith("MEMZUC_DOLULUK")],
+            )
         return text
 
     def _extract_pdf(self, file_path: str) -> str:
