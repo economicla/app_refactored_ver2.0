@@ -719,7 +719,10 @@ def _normalize_memzuc_row_name(left_text: str) -> Optional[str]:
         return "Toplam Nakdi Kredi"
     if "toplam" in low and "gn" in low and "kredi" in low:
         return "Toplam GN Kredi"
-    if low.rstrip().endswith("toplam") or low.strip() == "toplam":
+    # TOPLAM: sadece "toplam" veya satır sonu "toplam" (Toplam Nakdi/GN ile karışmasın)
+    if low.strip() == "toplam" or low.rstrip().endswith("toplam"):
+        return "TOPLAM"
+    if re.search(r"\btoplam\b", low) and "nakdi" not in low and "gn" not in low:
         return "TOPLAM"
     for rn in _MEMZUC_DOLULUK_ROW_NAMES:
         if rn.lower() in low or low in rn.lower():
@@ -760,7 +763,7 @@ def _parse_memzuc_crop(
         row_words = by_row[rk]
         row_words_sorted = sorted(row_words, key=lambda w: float(w.get("x0", 0)))
         left_parts = []
-        for w in row_words_sorted[:10]:
+        for w in row_words_sorted[:20]:
             t = (w.get("text") or "").strip()
             if t and not t.isdigit():
                 left_parts.append(t)
@@ -801,6 +804,51 @@ def _build_cropb_debug_line(
         f"MEMZUC_CROPB_DEBUG | header_top={header_top:.1f} | bboxB=(0,0,{page_width:.0f},{crop_b_bottom:.1f}) | "
         f"band_x0={band_x0:.1f} | tokens={','.join(tokens)}"
     )
+
+
+def _memzuc_doluluk_from_tables(
+    page, crop_bbox: Tuple[float, float, float, float], period: str
+) -> List[Tuple[str, str, int]]:
+    """
+    Crop bölgesindeki pdfplumber tablolarından Doluluk Oranı sütununu oku.
+    Words ile bulunamayan kalemler için yedek (Umumi Limit, TOPLAM vb.).
+    """
+    out: List[Tuple[str, str, int]] = []
+    try:
+        crop = page.crop(crop_bbox)
+        tables = crop.extract_tables() or []
+    except Exception:
+        return out
+    for tbl in tables:
+        if not tbl or len(tbl) < 2:
+            continue
+        # Başlık satırında "Doluluk" veya "Doluluk Oranı" sütununu bul
+        header = tbl[0]
+        doluluk_col: Optional[int] = None
+        for i, cell in enumerate(header or []):
+            if not cell:
+                continue
+            c = (cell or "").strip().lower()
+            if "doluluk" in c:
+                doluluk_col = i
+                break
+        if doluluk_col is None:
+            continue
+        for row in tbl[1:]:
+            if not row or doluluk_col >= len(row):
+                continue
+            left_text = " ".join(str(c or "").strip() for c in (row[: max(doluluk_col, 3)] or []))
+            row_name = _normalize_memzuc_row_name(left_text)
+            if not row_name or row_name not in _MEMZUC_DOLULUK_ROW_NAMES:
+                continue
+            raw = (row[doluluk_col] or "").strip().replace(" ", "")
+            try:
+                d = int(raw)
+            except ValueError:
+                continue
+            if 0 <= d <= 100:
+                out.append((period, row_name, d))
+    return out
 
 
 def _extract_memzuc_doluluk_from_page_words(
@@ -877,17 +925,23 @@ def _extract_memzuc_doluluk_from_page_words(
             logger.debug("Memzuc crop B page %s: %s", page_num, e)
             words_b = []
 
+    crop_a_results: List[Tuple[str, str, int]] = []
     if words_a:
         for t in _parse_memzuc_crop(words_a, _CROP_A_ROW_NAMES, period, "A"):
+            crop_a_results.append(t)
             all_results.append(t)
 
-    # Crop B (üst özet bandı) devre dışı: özet 2/7/6 gibi yanlış değer veriyor; sadece ana tablo (Crop A) kullan
+    # Crop B (üst özet): sadece Crop A'nın bulamadığı kalemler için fallback (Umumi Limit, TOPLAM bazen ana tabloda yakalanmıyor)
     doluluk_band_x0_b = page_width * _CROP_B_DOLULUK_BAND_RATIO
-    if words_b and False:  # Crop B kapatıldı
+    found_kalem = {rn for (_, rn, _) in crop_a_results}
+    if words_b:
         for t in _parse_memzuc_crop(
             words_b, _CROP_B_ROW_NAMES, period, "B", doluluk_band_x0=doluluk_band_x0_b
         ):
-            all_results.append(t)
+            _, rn, _ = t
+            if rn not in found_kalem:
+                all_results.append(t)
+                found_kalem.add(rn)
     if words_b:
         cropb_debug_line = _build_cropb_debug_line(
             words_b,
@@ -902,6 +956,15 @@ def _extract_memzuc_doluluk_from_page_words(
         key = (p, row_name)
         merged[key] = max(merged.get(key, 0), doluluk)
 
+    # Words/crop 4 kalem bulamadıysa tablo yedek dene (Doluluk Oranı sütunlu tablo)
+    if len(merged) < 4 and header_top is not None:
+        crop_bbox = (0, header_top, page_width, end_crop_a)
+        table_results = _memzuc_doluluk_from_tables(page, crop_bbox, period)
+        for p, row_name, doluluk in table_results:
+            key = (p, row_name)
+            if key not in merged:
+                merged[key] = doluluk
+
     lines_out = [
         f"MEMZUC_DOLULUK | dönem: {p} | kalem: {rn} | doluluk: {d}"
         for (p, rn), d in merged.items()
@@ -912,6 +975,8 @@ def _extract_memzuc_doluluk_from_page_words(
         "extracted_rows_count": len(lines_out),
         "memzuc_bbox_top": header_top,
         "memzuc_bbox_bottom": end_crop_a,
+        "rows": [{"kalem": rn, "doluluk": d} for (_, rn), d in merged.items()],
+        "words_a_count": len(words_a) if words_a else 0,
     }
     return lines_out, debug_out, cropb_debug_line
 
