@@ -506,6 +506,84 @@ def _parse_banka_istihbarati_from_text(text: str, page_num: int) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Memzuc Doluluk Oranı text fallback (page.tables yakalamadığında free_text'ten parse)
+# ---------------------------------------------------------------------------
+
+_MEMZUC_DOLULUK_SIGNALS = (
+    "KREDİ GRUBU FİRMA MEMZUÇ",
+    "KREDİ GRUBU FİRMA MEMZUC",
+    "MEMZUÇ DOLULUK",
+    "MEMZUC DOLULUK",
+    "Doluluk Oranı",
+)
+_MEMZUC_DOLULUK_PERIOD_RE = re.compile(r"(20\d{2}\s*/\s*\d{1,2})")
+_MEMZUC_DOLULUK_ROW_NAMES = (
+    "Umumi Limit",
+    "Toplam Nakdi Kredi",
+    "Toplam GN Kredi",
+    "TOPLAM",
+)
+
+
+def _parse_memzuc_doluluk_from_text(text: str) -> List[str]:
+    """
+    Metinde dönem (20xx/yy) bloklarını bulur; her blokta Umumi Limit, Toplam Nakdi Kredi,
+    Toplam GN Kredi, TOPLAM satırlarındaki son 1-2 haneli sayıyı doluluk oranı olarak alır.
+    Returns: ["MEMZUC_DOLULUK | dönem: 2025/12 | kalem: Umumi Limit | doluluk: 20", ...]
+    """
+    lines_out: List[str] = []
+    normalized = text.replace("\r", "\n")
+    period_matches = list(_MEMZUC_DOLULUK_PERIOD_RE.finditer(normalized))
+    for i, m in enumerate(period_matches):
+        period_raw = (m.group(1) or "").strip()
+        period_norm = period_raw.replace(" ", "")
+        start = m.end()
+        end = period_matches[i + 1].start() if i + 1 < len(period_matches) else len(normalized)
+        block = normalized[start:end]
+        for line in block.splitlines():
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+            line_lower = line_clean.lower()
+            for row_name in _MEMZUC_DOLULUK_ROW_NAMES:
+                if row_name.lower() in line_lower:
+                    nums = re.findall(r"\b\d{1,2}\b", line_clean)
+                    if nums:
+                        pct = nums[-1]
+                        lines_out.append(
+                            f"MEMZUC_DOLULUK | dönem: {period_norm} | kalem: {row_name} | doluluk: {pct}"
+                        )
+                    break
+    return lines_out
+
+
+def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
+    """
+    Tüm sayfalardan free_text/page_text alır; memzuc doluluk sinyali geçen sayfalarda
+    _parse_memzuc_doluluk_from_text çalıştırıp satırları toplar. DB'ye yazılacak format.
+    """
+    all_lines: List[str] = []
+    for pd in pages:
+        text = (
+            getattr(pd, "free_text", None)
+            or getattr(pd, "page_text", None)
+            or getattr(pd, "raw_text", None)
+        )
+        if not (text and str(text).strip()):
+            continue
+        t = str(text).strip()
+        hay = t.upper()
+        if not any(
+            sig in hay or sig in t
+            for sig in _MEMZUC_DOLULUK_SIGNALS
+        ):
+            continue
+        page_lines = _parse_memzuc_doluluk_from_text(t)
+        all_lines.extend(page_lines)
+    return all_lines
+
+
+# ---------------------------------------------------------------------------
 # Main extractor class
 # ---------------------------------------------------------------------------
 
@@ -558,6 +636,12 @@ class CreditIntelligencePDFExtractor:
 
         # Build each section from the assigned data
         sections = self._build_sections(assigned, warnings)
+
+        # Memzuc doluluk tablosu page.tables ile gelmeyebilir; free_text fallback
+        memzuc_fallback = _collect_memzuc_doluluk_from_pages(pages_data)
+        if memzuc_fallback:
+            sections["memzuc_doluluk_fallback"] = memzuc_fallback
+            logger.info("Memzuc doluluk text fallback: %s satır", len(memzuc_fallback))
 
         return {
             "doc_type": "İstihbarat Raporu",
@@ -1407,6 +1491,14 @@ def render_structured_text(data: Dict) -> str:
                     f"{k}: {v}" for k, v in entry.items() if k != "source_page"
                 )
                 parts.append(line)
+        parts.append("")
+
+    # Memzuc Doluluk Oranları (text fallback — DB'de MEMZUC_DOLULUK araması için)
+    memzuc_doluluk = sections.get("memzuc_doluluk_fallback", [])
+    if memzuc_doluluk and isinstance(memzuc_doluluk, list):
+        parts.append("## Memzuc Doluluk Oranları")
+        for line in memzuc_doluluk:
+            parts.append(line)
         parts.append("")
 
     # Konsolide Memzuç
