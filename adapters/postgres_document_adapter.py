@@ -617,10 +617,11 @@ class PostgresDocumentAdapter(IDocumentRepository):
         """
         async with await self._get_session() as session:
             try:
-                # Memzuc sinyali: üç ifadeden biri + dönem formatı 20xx/xx
+                # Memzuc sinyali: structured line veya tablo ifadeleri + dönem formatı 20xx/xx
                 memzuc_cond = text(
                     "("
-                    " content ILIKE '%KREDİ GRUBU FİRMA MEMZUCULARI%'"
+                    " content ILIKE '%MEMZUC_DOLULUK%'"
+                    " OR content ILIKE '%KREDİ GRUBU FİRMA MEMZUCULARI%'"
                     " OR content ILIKE '%MEMZUC BİLGİLERİ%'"
                     " OR content ILIKE '%Doluluk Oranı%'"
                     ") AND content ~ '20[0-9]{2}[[:space:]]*/[[:space:]]*[0-9]{2}'"
