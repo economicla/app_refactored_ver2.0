@@ -527,6 +527,49 @@ _MEMZUC_DOLULUK_ROW_NAMES = (
 _MEMZUC_ROW_Y_TOLERANCE = 4
 
 
+def _rightmost_doluluk_from_row_words(
+    row_words_sorted: List[Dict],
+) -> Optional[int]:
+    """
+    Satırdaki kelimelerden en sağdaki doluluk oranını (0-100) al.
+    PDF'te '20' bazen '2' ve '0' iki kelime gelir; sağdan bitişik rakam kelimelerini birleştirir.
+    """
+    for i in range(len(row_words_sorted) - 1, -1, -1):
+        w = row_words_sorted[i]
+        t = (w.get("text") or "").strip().replace(" ", "")
+        if not t:
+            continue
+        try:
+            n = int(t)
+        except ValueError:
+            continue
+        if not (0 <= n <= 100):
+            continue
+        # Zaten iki+ haneli sayı (20, 22, 25 vb.) -> doğrudan kullan
+        if n >= 10:
+            return n
+        # Tek rakam: sola doğru bitişik tek rakam kelimelerini topla (örn. "2","0" -> 20)
+        digits = [n]
+        for j in range(i - 1, -1, -1):
+            tw = (row_words_sorted[j].get("text") or "").strip().replace(" ", "")
+            try:
+                d = int(tw)
+                if 0 <= d <= 9:
+                    digits.append(d)
+                    if len(digits) >= 3:
+                        break
+                else:
+                    break
+            except ValueError:
+                break
+        if len(digits) == 2:
+            combined = digits[1] * 10 + digits[0]
+            if 0 <= combined <= 100:
+                return combined
+        return n
+    return None
+
+
 def _normalize_memzuc_row_name(left_text: str) -> Optional[str]:
     """Soldaki kelimelerden canonical satır adını döndür (üst özet + ana blok aynı kalemler)."""
     t = (left_text or "").strip()
@@ -588,17 +631,27 @@ def _extract_memzuc_doluluk_from_page_words(page, page_num: int) -> List[str]:
                     period_at_top.append((rk, period_norm))
                     break
     period_at_top.sort(key=lambda x: x[0])
+    # Sayfada dönem yoksa çık (dönem atayamayız)
+    if not period_at_top:
+        return []
+    first_period_top = period_at_top[0][0]
+    first_period_str = period_at_top[0][1]
 
     # (period, row_name) -> max doluluk (üst özet 20/22, ana blok 2/7 aynı sayfada; max doğru)
     merged: Dict[Tuple[str, str], int] = {}
     for rk in row_keys_sorted:
         row_words = by_row[rk]
         row_top = min(float(w.get("top", 0)) for w in row_words)
-        # Bu satırın dönemi: satırdan önceki en son dönem
+        # Dönem: satır dönem başlığının altındaysa "önceki en son dönem"; ÜST ÖZET tablosu
+        # dönem başlığının üstünde olduğu için onlara sayfadaki ilk dönemi ver
         period = None
-        for pt, pstr in period_at_top:
-            if pt <= row_top:
-                period = pstr
+        if row_top >= first_period_top:
+            for pt, pstr in period_at_top:
+                if pt <= row_top:
+                    period = pstr
+        else:
+            # Satır ilk dönem başlığının üstünde (üst özet tablo) -> aynı sayfadaki ilk dönem
+            period = first_period_str
         if not period:
             continue
 
@@ -614,17 +667,9 @@ def _extract_memzuc_doluluk_from_page_words(page, page_num: int) -> List[str]:
         if not row_name:
             continue
 
-        # Doluluk: en sağdaki 0-100 arası sayı (Doluluk sütunu en sağda)
-        doluluk = None
-        for w in reversed(row_words_sorted):
-            t = (w.get("text") or "").strip().replace(" ", "")
-            try:
-                n = int(t)
-                if 0 <= n <= 100:
-                    doluluk = n
-                    break
-            except ValueError:
-                continue
+        # Doluluk: en sağdaki 0-100 arası sayı (Doluluk sütunu en sağda).
+        # PDF'te "20" bazen "2" ve "0" iki kelime olarak gelir; bitişik rakam kelimelerini birleştir.
+        doluluk = _rightmost_doluluk_from_row_words(row_words_sorted)
         if doluluk is None:
             continue
 
