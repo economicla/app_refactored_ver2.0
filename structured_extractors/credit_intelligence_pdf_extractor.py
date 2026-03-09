@@ -529,19 +529,29 @@ _MEMZUC_DOLULUK_ROW_NAMES = (
 )
 # Satır gruplama: aynı y'ye yakın kelimeler aynı satır (tolerance pt)
 _MEMZUC_ROW_Y_TOLERANCE = 4
-# Memzuc tablo bandı: başlık bulunur, header_top'tan itibaren bu yükseklik parse edilir
-_MEMZUC_BBOX_HEIGHT = 260
+# Crop A: ANA FİRMA DAHİL tablosu (header_top .. header_top+240) — sadece Toplam Nakdi / Toplam GN
+_MEMZUC_CROP_A_HEIGHT = 240
+# Başlık: sadece bu bulunursa words parser çalışır
+_MEMZUC_HEADER_FOR_CROP = (
+    "KREDİ GRUBU FİRMA MEMZUCULARI",
+    "KREDİ GRUBU FİRMA MEMZUÇLARI",
+)
 _MEMZUC_HEADER_PATTERNS = (
     "KREDİ GRUBU FİRMA MEMZUCULARI",
     "KREDİ GRUBU FİRMA MEMZUÇLARI",
     "ANA FİRMA DAHİL",
 )
+# Crop A'dan sadece bu iki kalem
+_CROP_A_ROW_NAMES = ("Toplam Nakdi Kredi", "Toplam GN Kredi")
+# Crop B'den sadece bu iki kalem (üst özet: TOPLAM, Umumi Limit)
+_CROP_B_ROW_NAMES = ("TOPLAM", "Umumi Limit")
+_DEFAULT_MEMZUC_PERIOD = "2025/12"
 
 
 def _find_memzuc_header_top(words: List[Dict]) -> Optional[float]:
     """
-    Sayfa kelimelerinde 'KREDİ GRUBU FİRMA MEMZUCULARI' veya 'ANA FİRMA DAHİL' başlık satırını bulur,
-    o satırın top değerini döndürür (crop bandı için).
+    Sayfa kelimelerinde 'KREDİ GRUBU FİRMA MEMZUCULARI' başlık satırını bulur,
+    o satırın top değerini döndürür (Crop A/B ayırımı için).
     """
     tol = _MEMZUC_ROW_Y_TOLERANCE
     by_row: Dict[float, List[Dict]] = {}
@@ -555,9 +565,19 @@ def _find_memzuc_header_top(words: List[Dict]) -> Optional[float]:
     for rk in sorted(by_row.keys()):
         row_words = by_row[rk]
         line_text = " ".join((w.get("text") or "").strip() for w in row_words).upper()
-        for pat in _MEMZUC_HEADER_PATTERNS:
+        for pat in _MEMZUC_HEADER_FOR_CROP:
             if pat in line_text or pat.replace("İ", "I").replace("Ç", "C") in line_text:
                 return min(float(w.get("top", 0)) for w in row_words)
+    return None
+
+
+def _period_in_words(words: List[Dict]) -> Optional[str]:
+    """Kelimeler arasında 20xx/yy dönem kalıbını bulur; yoksa None."""
+    for w in words:
+        txt = (w.get("text") or "").strip()
+        m = _MEMZUC_DOLULUK_PERIOD_RE.search(txt)
+        if m:
+            return (m.group(1) or "").replace(" ", "").strip()
     return None
 
 
@@ -687,15 +707,55 @@ def _normalize_memzuc_row_name(left_text: str) -> Optional[str]:
     return None
 
 
+def _parse_memzuc_crop(
+    words: List[Dict],
+    allowed_row_names: Tuple[str, ...],
+    period: str,
+    crop_label: str,
+) -> List[Tuple[str, str, int]]:
+    """
+    Tek crop'tan (words) sadece allowed_row_names kalemlerini çıkarır; her biri için (period, row_name, doluluk).
+    period crop içinde bulunamadıysa zaten 2025/12 verilmiş olmalı.
+    """
+    tol = _MEMZUC_ROW_Y_TOLERANCE
+    doluluk_x0 = _find_doluluk_column_x0(words)
+    by_row: Dict[float, List[Dict]] = {}
+    for w in words:
+        text = (w.get("text") or "").strip()
+        if not text:
+            continue
+        top = float(w.get("top", 0))
+        row_key = round(top / tol) * tol
+        by_row.setdefault(row_key, []).append(w)
+
+    out: List[Tuple[str, str, int]] = []
+    for rk in sorted(by_row.keys()):
+        row_words = by_row[rk]
+        row_words_sorted = sorted(row_words, key=lambda w: float(w.get("x0", 0)))
+        left_parts = []
+        for w in row_words_sorted[:10]:
+            t = (w.get("text") or "").strip()
+            if t and not t.isdigit():
+                left_parts.append(t)
+        left_text = " ".join(left_parts)
+        row_name = _normalize_memzuc_row_name(left_text)
+        if not row_name or row_name not in allowed_row_names:
+            continue
+        doluluk = _doluluk_from_row_words_in_column(row_words_sorted, doluluk_x0, margin=10.0)
+        if doluluk is None:
+            continue
+        out.append((period, row_name, doluluk))
+    return out
+
+
 def _extract_memzuc_doluluk_from_page_words(
     page, page_num: int
 ) -> Tuple[List[str], Dict[str, Any]]:
     """
-    Memzuc tablosunu bounding box ile sınırlar: başlık 'KREDİ GRUBU FİRMA MEMZUCULARI' veya
-    'ANA FİRMA DAHİL' bulunur, header_top'tan itibaren 260pt band crop edilir; sadece bu band
-    içindeki kelimeler parse edilir. Böylece sayfadaki diğer tablolarla karışmaz.
-    Band içinde dönem (2025/12 vb.) ve sadece 4 kalem (Umumi Limit, Toplam Nakdi, Toplam GN, TOPLAM)
-    + Doluluk x0 referansı kullanılır. Returns: (lines, debug_dict).
+    MEMZUC_DOLULUK üretimini kesin olarak iki crop alanına kısıtlar; bu alanlar dışında üretim yok.
+    Crop A: header_top .. header_top+240 — sadece Toplam Nakdi Kredi, Toplam GN Kredi (25, 3).
+    Crop B: 0 .. header_top (üst band) — sadece TOPLAM, Umumi Limit (22, 20).
+    Dönem: her crop içinde 20xx/yy aranır; yoksa 2025/12. 'Son görülen dönem' kaldırıldı.
     """
     empty_debug: Dict[str, Any] = {
         "doluluk_x0": None,
@@ -712,95 +772,46 @@ def _extract_memzuc_doluluk_from_page_words(
     if not full_words:
         return [], empty_debug
 
-    # Başlık bazlı crop: Memzuc tablo bandı
     header_top = _find_memzuc_header_top(full_words)
     if header_top is None:
-        logger.debug("Memzuc header not found on page %s, skip crop", page_num)
+        logger.debug("Memzuc header KREDİ GRUBU FİRMA MEMZUCULARI not found on page %s", page_num)
         return [], empty_debug
 
     page_width = getattr(page, "width", 612)
-    bbox_bottom = header_top + _MEMZUC_BBOX_HEIGHT
+    all_results: List[Tuple[str, str, int]] = []
+    periods_seen: List[str] = []
+
+    # Crop A: (0, header_top, page.width, header_top + 240) — sadece Toplam Nakdi, Toplam GN
     try:
-        cropped = page.crop((0, header_top, page_width, bbox_bottom))
-        words = cropped.extract_words() or []
+        crop_a = page.crop((0, header_top, page_width, header_top + _MEMZUC_CROP_A_HEIGHT))
+        words_a = crop_a.extract_words() or []
     except Exception as e:
-        logger.debug("Memzuc crop/extract page %s: %s", page_num, e)
-        return [], {**empty_debug, "memzuc_bbox_top": header_top, "memzuc_bbox_bottom": bbox_bottom}
-    if not words:
-        return [], {
-            **empty_debug,
-            "memzuc_bbox_top": header_top,
-            "memzuc_bbox_bottom": bbox_bottom,
-        }
+        logger.debug("Memzuc crop A page %s: %s", page_num, e)
+        words_a = []
+    if words_a:
+        period_a = _period_in_words(words_a) or _DEFAULT_MEMZUC_PERIOD
+        periods_seen.append(period_a)
+        for t in _parse_memzuc_crop(words_a, _CROP_A_ROW_NAMES, period_a, "A"):
+            all_results.append(t)
+    end_crop_a = header_top + _MEMZUC_CROP_A_HEIGHT
 
-    tol = _MEMZUC_ROW_Y_TOLERANCE
-    doluluk_x0 = _find_doluluk_column_x0(words)
+    # Crop B: (0, 0, page.width, header_top) — üst band, sadece TOPLAM, Umumi Limit
+    try:
+        crop_b = page.crop((0, 0, page_width, header_top))
+        words_b = crop_b.extract_words() or []
+    except Exception as e:
+        logger.debug("Memzuc crop B page %s: %s", page_num, e)
+        words_b = []
+    if words_b:
+        period_b = _period_in_words(words_b) or _DEFAULT_MEMZUC_PERIOD
+        if period_b not in periods_seen:
+            periods_seen.append(period_b)
+        for t in _parse_memzuc_crop(words_b, _CROP_B_ROW_NAMES, period_b, "B"):
+            all_results.append(t)
 
-    # Band içindeki kelimeleri y'ye göre satırlara grupla
-    by_row: Dict[float, List[Dict]] = {}
-    for w in words:
-        text = (w.get("text") or "").strip()
-        if not text:
-            continue
-        top = float(w.get("top", 0))
-        row_key = round(top / tol) * tol
-        by_row.setdefault(row_key, []).append(w)
-
-    row_keys_sorted = sorted(by_row.keys())
-    # Dönem ataması: sadece bu band içindeki 2025/12 vb. kullanılır, band dışı karışmaz
-    period_at_top: List[Tuple[float, str]] = []
-    for rk in row_keys_sorted:
-        row_words = by_row[rk]
-        for w in row_words:
-            txt = (w.get("text") or "").strip()
-            m = _MEMZUC_DOLULUK_PERIOD_RE.search(txt)
-            if m:
-                period_norm = (m.group(1) or "").replace(" ", "").strip()
-                if period_norm:
-                    period_at_top.append((rk, period_norm))
-                    break
-    period_at_top.sort(key=lambda x: x[0])
-    if not period_at_top:
-        return [], {
-            **empty_debug,
-            "memzuc_bbox_top": header_top,
-            "memzuc_bbox_bottom": bbox_bottom,
-            "periods_found": [],
-        }
-    first_period_top = period_at_top[0][0]
-    first_period_str = period_at_top[0][1]
-    periods_found = list({p[1] for p in period_at_top})
-
-    # Sadece 4 kalem: Umumi Limit, Toplam Nakdi Kredi, Toplam GN Kredi, TOPLAM
+    # (period, row_name) -> max doluluk (aynı kalem iki crop'tan gelirse)
     merged: Dict[Tuple[str, str], int] = {}
-    for rk in row_keys_sorted:
-        row_words = by_row[rk]
-        row_top = min(float(w.get("top", 0)) for w in row_words)
-        period = None
-        if row_top >= first_period_top:
-            for pt, pstr in period_at_top:
-                if pt <= row_top:
-                    period = pstr
-        else:
-            period = first_period_str
-        if not period:
-            continue
-
-        row_words_sorted = sorted(row_words, key=lambda w: float(w.get("x0", 0)))
-        left_parts = []
-        for w in row_words_sorted[:10]:
-            t = (w.get("text") or "").strip()
-            if t and not t.isdigit():
-                left_parts.append(t)
-        left_text = " ".join(left_parts)
-        row_name = _normalize_memzuc_row_name(left_text)
-        if not row_name:
-            continue
-
-        doluluk = _doluluk_from_row_words_in_column(row_words_sorted, doluluk_x0, margin=10.0)
-        if doluluk is None:
-            continue
-
+    for period, row_name, doluluk in all_results:
         key = (period, row_name)
         merged[key] = max(merged.get(key, 0), doluluk)
 
@@ -809,30 +820,28 @@ def _extract_memzuc_doluluk_from_page_words(
         for (p, rn), d in merged.items()
     ]
     debug_out = {
-        "doluluk_x0": doluluk_x0,
-        "periods_found": periods_found,
+        "doluluk_x0": None,
+        "periods_found": list(dict.fromkeys(periods_seen)),
         "extracted_rows_count": len(lines_out),
         "memzuc_bbox_top": header_top,
-        "memzuc_bbox_bottom": bbox_bottom,
+        "memzuc_bbox_bottom": end_crop_a,
     }
     return lines_out, debug_out
 
 
 def _page_has_memzuc_signal(free_text: Optional[str]) -> bool:
     """
-    Memzuc sayfası sinyali (gevşek): words parser'ın kesin çalışması için.
-    True döner: 'Doluluk' geçiyorsa VEYA 'KREDİ GRUBU FİRMA MEMZUC' geçiyorsa VEYA 20xx/yy dönem kalıbı varsa.
+    Memzuc words parser sadece bu başlık bulunursa çalışsın; yoksa text fallback.
+    True: sayfa metninde 'KREDİ GRUBU FİRMA MEMZUCULARI' veya 'ANA FİRMA DAHİL' geçiyorsa.
+    Sinyal gevşetme kaldırıldı (Doluluk / 20xx/yy tek başına yeterli değil).
     """
     if not free_text or not str(free_text).strip():
         return False
     t = str(free_text).strip()
-    hay = _tr_lower(t)
     hay_upper = t.upper()
-    if "doluluk" in hay:
+    if "KREDİ GRUBU FİRMA MEMZUCULARI" in hay_upper or "KREDİ GRUBU FİRMA MEMZUÇLARI" in hay_upper:
         return True
-    if "KREDİ GRUBU FİRMA MEMZUC" in hay_upper or "KREDİ GRUBU FİRMA MEMZUÇ" in hay_upper:
-        return True
-    if _MEMZUC_DOLULUK_PERIOD_RE.search(t):
+    if "ANA FİRMA DAHİL" in hay_upper:
         return True
     return False
 
