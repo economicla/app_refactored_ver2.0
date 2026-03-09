@@ -529,6 +529,36 @@ _MEMZUC_DOLULUK_ROW_NAMES = (
 )
 # Satır gruplama: aynı y'ye yakın kelimeler aynı satır (tolerance pt)
 _MEMZUC_ROW_Y_TOLERANCE = 4
+# Memzuc tablo bandı: başlık bulunur, header_top'tan itibaren bu yükseklik parse edilir
+_MEMZUC_BBOX_HEIGHT = 260
+_MEMZUC_HEADER_PATTERNS = (
+    "KREDİ GRUBU FİRMA MEMZUCULARI",
+    "KREDİ GRUBU FİRMA MEMZUÇLARI",
+    "ANA FİRMA DAHİL",
+)
+
+
+def _find_memzuc_header_top(words: List[Dict]) -> Optional[float]:
+    """
+    Sayfa kelimelerinde 'KREDİ GRUBU FİRMA MEMZUCULARI' veya 'ANA FİRMA DAHİL' başlık satırını bulur,
+    o satırın top değerini döndürür (crop bandı için).
+    """
+    tol = _MEMZUC_ROW_Y_TOLERANCE
+    by_row: Dict[float, List[Dict]] = {}
+    for w in words:
+        text = (w.get("text") or "").strip()
+        if not text:
+            continue
+        top = float(w.get("top", 0))
+        row_key = round(top / tol) * tol
+        by_row.setdefault(row_key, []).append(w)
+    for rk in sorted(by_row.keys()):
+        row_words = by_row[rk]
+        line_text = " ".join((w.get("text") or "").strip() for w in row_words).upper()
+        for pat in _MEMZUC_HEADER_PATTERNS:
+            if pat in line_text or pat.replace("İ", "I").replace("Ç", "C") in line_text:
+                return min(float(w.get("top", 0)) for w in row_words)
+    return None
 
 
 def _merge_memzuc_lines_across_pages(lines: List[str]) -> List[str]:
@@ -661,28 +691,52 @@ def _extract_memzuc_doluluk_from_page_words(
     page, page_num: int
 ) -> Tuple[List[str], Dict[str, Any]]:
     """
-    pdfplumber extract_words ile satırları y'ye göre grupla; Doluluk Oranı sütununun x0'ını
-    referans alıp sadece o sütundaki (x0 >= doluluk_x0 - 10) sayıyı doluluk olarak alır.
-    Returns: (lines, debug_dict) with doluluk_x0, periods_found, extracted_rows_count.
+    Memzuc tablosunu bounding box ile sınırlar: başlık 'KREDİ GRUBU FİRMA MEMZUCULARI' veya
+    'ANA FİRMA DAHİL' bulunur, header_top'tan itibaren 260pt band crop edilir; sadece bu band
+    içindeki kelimeler parse edilir. Böylece sayfadaki diğer tablolarla karışmaz.
+    Band içinde dönem (2025/12 vb.) ve sadece 4 kalem (Umumi Limit, Toplam Nakdi, Toplam GN, TOPLAM)
+    + Doluluk x0 referansı kullanılır. Returns: (lines, debug_dict).
     """
     empty_debug: Dict[str, Any] = {
         "doluluk_x0": None,
         "periods_found": [],
         "extracted_rows_count": 0,
+        "memzuc_bbox_top": None,
+        "memzuc_bbox_bottom": None,
     }
     try:
-        words = page.extract_words() or []
+        full_words = page.extract_words() or []
     except Exception as e:
         logger.debug("Memzuc words extract page %s: %s", page_num, e)
         return [], empty_debug
-    if not words:
+    if not full_words:
         return [], empty_debug
-    tol = _MEMZUC_ROW_Y_TOLERANCE
 
-    # Doluluk Oranı sütununun x0'ı (başlıktan); yanlış sütundan 2/7 gelmesin
+    # Başlık bazlı crop: Memzuc tablo bandı
+    header_top = _find_memzuc_header_top(full_words)
+    if header_top is None:
+        logger.debug("Memzuc header not found on page %s, skip crop", page_num)
+        return [], empty_debug
+
+    page_width = getattr(page, "width", 612)
+    bbox_bottom = header_top + _MEMZUC_BBOX_HEIGHT
+    try:
+        cropped = page.crop((0, header_top, page_width, bbox_bottom))
+        words = cropped.extract_words() or []
+    except Exception as e:
+        logger.debug("Memzuc crop/extract page %s: %s", page_num, e)
+        return [], {**empty_debug, "memzuc_bbox_top": header_top, "memzuc_bbox_bottom": bbox_bottom}
+    if not words:
+        return [], {
+            **empty_debug,
+            "memzuc_bbox_top": header_top,
+            "memzuc_bbox_bottom": bbox_bottom,
+        }
+
+    tol = _MEMZUC_ROW_Y_TOLERANCE
     doluluk_x0 = _find_doluluk_column_x0(words)
 
-    # Kelimeleri y'ye göre satırlara grupla
+    # Band içindeki kelimeleri y'ye göre satırlara grupla
     by_row: Dict[float, List[Dict]] = {}
     for w in words:
         text = (w.get("text") or "").strip()
@@ -693,6 +747,7 @@ def _extract_memzuc_doluluk_from_page_words(
         by_row.setdefault(row_key, []).append(w)
 
     row_keys_sorted = sorted(by_row.keys())
+    # Dönem ataması: sadece bu band içindeki 2025/12 vb. kullanılır, band dışı karışmaz
     period_at_top: List[Tuple[float, str]] = []
     for rk in row_keys_sorted:
         row_words = by_row[rk]
@@ -706,11 +761,17 @@ def _extract_memzuc_doluluk_from_page_words(
                     break
     period_at_top.sort(key=lambda x: x[0])
     if not period_at_top:
-        return [], {**empty_debug, "periods_found": []}
+        return [], {
+            **empty_debug,
+            "memzuc_bbox_top": header_top,
+            "memzuc_bbox_bottom": bbox_bottom,
+            "periods_found": [],
+        }
     first_period_top = period_at_top[0][0]
     first_period_str = period_at_top[0][1]
     periods_found = list({p[1] for p in period_at_top})
 
+    # Sadece 4 kalem: Umumi Limit, Toplam Nakdi Kredi, Toplam GN Kredi, TOPLAM
     merged: Dict[Tuple[str, str], int] = {}
     for rk in row_keys_sorted:
         row_words = by_row[rk]
@@ -736,7 +797,6 @@ def _extract_memzuc_doluluk_from_page_words(
         if not row_name:
             continue
 
-        # Sadece Doluluk Oranı sütunundaki sayıyı al (x0 >= doluluk_x0 - 10)
         doluluk = _doluluk_from_row_words_in_column(row_words_sorted, doluluk_x0, margin=10.0)
         if doluluk is None:
             continue
@@ -752,6 +812,8 @@ def _extract_memzuc_doluluk_from_page_words(
         "doluluk_x0": doluluk_x0,
         "periods_found": periods_found,
         "extracted_rows_count": len(lines_out),
+        "memzuc_bbox_top": header_top,
+        "memzuc_bbox_bottom": bbox_bottom,
     }
     return lines_out, debug_out
 
@@ -890,12 +952,15 @@ class CreditIntelligencePDFExtractor:
                                 "doluluk_x0": page_debug.get("doluluk_x0"),
                                 "periods_found": page_debug.get("periods_found", []),
                                 "extracted_rows_count": len(memzuc_lines_from_words),
+                                "memzuc_bbox_top": page_debug.get("memzuc_bbox_top"),
+                                "memzuc_bbox_bottom": page_debug.get("memzuc_bbox_bottom"),
                             }
                             logger.info(
-                                "Memzuc words parser page %s: doluluk_x0=%s periods_found=%s rows=%s",
+                                "Memzuc words parser page %s: bbox_top=%s bbox_bottom=%s doluluk_x0=%s rows=%s",
                                 page_num,
+                                page_debug.get("memzuc_bbox_top"),
+                                page_debug.get("memzuc_bbox_bottom"),
                                 page_debug.get("doluluk_x0"),
-                                page_debug.get("periods_found"),
                                 len(word_lines),
                             )
                         else:
