@@ -517,6 +517,10 @@ _MEMZUC_DOLULUK_SIGNALS = (
     "Doluluk Oranı",
 )
 _MEMZUC_DOLULUK_PERIOD_RE = re.compile(r"(20\d{2}\s*/\s*\d{1,2})")
+_MEMZUC_LINE_RE = re.compile(
+    r"MEMZUC_DOLULUK\s*\|\s*dönem:\s*(\S+)\s*\|\s*kalem:\s*([^|]+?)\s*\|\s*doluluk:\s*(\d+)",
+    re.IGNORECASE,
+)
 _MEMZUC_DOLULUK_ROW_NAMES = (
     "Umumi Limit",
     "Toplam Nakdi Kredi",
@@ -527,10 +531,39 @@ _MEMZUC_DOLULUK_ROW_NAMES = (
 _MEMZUC_ROW_Y_TOLERANCE = 4
 
 
+def _merge_memzuc_lines_across_pages(lines: List[str]) -> List[str]:
+    """
+    Birden fazla sayfadan gelen MEMZUC_DOLULUK satırlarını (dönem, kalem) bazında birleştirir;
+    aynı (dönem, kalem) için doluluk = max(doluluk). Böylece chunk'lara dağılan 2/7/0/28/39
+    yerine tek satırda 20/22 döner.
+    """
+    merged: Dict[Tuple[str, str], int] = {}
+    for line in lines:
+        line = (line or "").strip()
+        m = _MEMZUC_LINE_RE.search(line)
+        if not m:
+            continue
+        period = (m.group(1) or "").strip()
+        kalem = (m.group(2) or "").strip()
+        try:
+            doluluk = int((m.group(3) or "").strip())
+        except ValueError:
+            continue
+        if not period or not kalem:
+            continue
+        key = (period, kalem)
+        merged[key] = max(merged.get(key, 0), doluluk)
+    return [
+        f"MEMZUC_DOLULUK | dönem: {p} | kalem: {rn} | doluluk: {d}"
+        for (p, rn), d in merged.items()
+    ]
+
+
 def _find_doluluk_column_x0(words: List[Dict]) -> Optional[float]:
     """
-    extract_words içinde 'Doluluk' veya 'Doluluk Oranı' başlığını bulur, sütunun x0'ını döndürür.
-    Böylece her satırda sadece x0 >= doluluk_x0 - 10 olan sayılar aday alınır (2/7 yerine 20/22).
+    extract_words içinde 'Doluluk' / 'Doluluk Oranı' başlığını bulur.
+    Sayfada iki tablo (2024/12, 2025/12) varsa en sağdaki tablonun sütununu al: max(x0).
+    Böylece 20/22 doğru sütundan okunur (sol tablodaki 2/7 değil).
     """
     x0_candidates: List[float] = []
     for w in words:
@@ -540,7 +573,7 @@ def _find_doluluk_column_x0(words: List[Dict]) -> Optional[float]:
         low = _tr_lower(txt)
         if "doluluk" in low:
             x0_candidates.append(float(w.get("x0", 0)))
-    return min(x0_candidates) if x0_candidates else None
+    return max(x0_candidates) if x0_candidates else None
 
 
 def _doluluk_from_row_words_in_column(
@@ -884,7 +917,16 @@ class CreditIntelligencePDFExtractor:
         memzuc_fallback = memzuc_lines_from_words
         if not memzuc_fallback:
             memzuc_fallback = _collect_memzuc_doluluk_from_pages(pages_data)
+        # Aynı (dönem, kalem) birden fazla sayfa/chunk'ta farklı değerle gelirse tek satırda max al
         if memzuc_fallback:
+            before_merge = len(memzuc_fallback)
+            memzuc_fallback = _merge_memzuc_lines_across_pages(memzuc_fallback)
+            if before_merge != len(memzuc_fallback):
+                logger.info(
+                    "Memzuc sayfalar arası merge: %s -> %s satır",
+                    before_merge,
+                    len(memzuc_fallback),
+                )
             sections["memzuc_doluluk_fallback"] = memzuc_fallback
             if memzuc_words_debug:
                 memzuc_words_debug["extracted_rows_count"] = len(memzuc_fallback)
