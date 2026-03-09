@@ -931,12 +931,12 @@ def _extract_memzuc_doluluk_from_page_words(
             crop_a_results.append(t)
             all_results.append(t)
 
-    # Crop B (üst özet): sadece Crop A'nın bulamadığı kalemler için fallback (Umumi Limit, TOPLAM bazen ana tabloda yakalanmıyor)
+    # Crop B (üst özet): sadece Crop A'nın bulamadığı kalemler için fallback. Doluluk sütununu Crop B kelimelerinden bul (sabit band özet tabloda yanlış kalabiliyor).
     doluluk_band_x0_b = page_width * _CROP_B_DOLULUK_BAND_RATIO
     found_kalem = {rn for (_, rn, _) in crop_a_results}
     if words_b:
         for t in _parse_memzuc_crop(
-            words_b, _CROP_B_ROW_NAMES, period, "B", doluluk_band_x0=doluluk_band_x0_b
+            words_b, _CROP_B_ROW_NAMES, period, "B", doluluk_band_x0=None
         ):
             _, rn, _ = t
             if rn not in found_kalem:
@@ -1119,6 +1119,7 @@ class CreditIntelligencePDFExtractor:
                                 "extracted_rows_count": len(memzuc_lines_from_words),
                                 "memzuc_bbox_top": page_debug.get("memzuc_bbox_top"),
                                 "memzuc_bbox_bottom": page_debug.get("memzuc_bbox_bottom"),
+                                "rows": page_debug.get("rows", []),
                             }
                             logger.info(
                                 "Memzuc words parser page %s: bbox_top=%s bbox_bottom=%s doluluk_x0=%s rows=%s",
