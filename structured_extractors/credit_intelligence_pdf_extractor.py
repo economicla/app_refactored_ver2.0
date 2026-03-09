@@ -527,6 +527,40 @@ _MEMZUC_DOLULUK_ROW_NAMES = (
 _MEMZUC_ROW_Y_TOLERANCE = 4
 
 
+def _find_doluluk_column_x0(words: List[Dict]) -> Optional[float]:
+    """
+    extract_words içinde 'Doluluk' veya 'Doluluk Oranı' başlığını bulur, sütunun x0'ını döndürür.
+    Böylece her satırda sadece x0 >= doluluk_x0 - 10 olan sayılar aday alınır (2/7 yerine 20/22).
+    """
+    x0_candidates: List[float] = []
+    for w in words:
+        txt = (w.get("text") or "").strip()
+        if not txt:
+            continue
+        low = _tr_lower(txt)
+        if "doluluk" in low:
+            x0_candidates.append(float(w.get("x0", 0)))
+    return min(x0_candidates) if x0_candidates else None
+
+
+def _doluluk_from_row_words_in_column(
+    row_words_sorted: List[Dict], doluluk_x0: Optional[float], margin: float = 10.0
+) -> Optional[int]:
+    """
+    Satırda sadece Doluluk Oranı sütunundaki (x0 >= doluluk_x0 - margin) numeric token'ları aday alır,
+    adaylardan 0-100 arası doluluk değerini seçer (birleştirerek: 2+0 -> 20).
+    doluluk_x0 yoksa sağdaki sayıya fallback.
+    """
+    if doluluk_x0 is not None:
+        row_words_sorted = [
+            w for w in row_words_sorted
+            if float(w.get("x0", 0)) >= doluluk_x0 - margin
+        ]
+    if not row_words_sorted:
+        return None
+    return _rightmost_doluluk_from_row_words(row_words_sorted)
+
+
 def _rightmost_doluluk_from_row_words(
     row_words_sorted: List[Dict],
 ) -> Optional[int]:
@@ -590,35 +624,42 @@ def _normalize_memzuc_row_name(left_text: str) -> Optional[str]:
     return None
 
 
-def _extract_memzuc_doluluk_from_page_words(page, page_num: int) -> List[str]:
+def _extract_memzuc_doluluk_from_page_words(
+    page, page_num: int
+) -> Tuple[List[str], Dict[str, Any]]:
     """
-    pdfplumber extract_words ile satırları y koordinatına göre grupla; satır adını soldan,
-    doluluk oranını en sağdaki 0-100 arası sayı olarak al (üst özet tabloda doğru sütun).
-    Returns: ["MEMZUC_DOLULUK | dönem: 2025/12 | kalem: Umumi Limit | doluluk: 20", ...]
+    pdfplumber extract_words ile satırları y'ye göre grupla; Doluluk Oranı sütununun x0'ını
+    referans alıp sadece o sütundaki (x0 >= doluluk_x0 - 10) sayıyı doluluk olarak alır.
+    Returns: (lines, debug_dict) with doluluk_x0, periods_found, extracted_rows_count.
     """
+    empty_debug: Dict[str, Any] = {
+        "doluluk_x0": None,
+        "periods_found": [],
+        "extracted_rows_count": 0,
+    }
     try:
         words = page.extract_words() or []
     except Exception as e:
         logger.debug("Memzuc words extract page %s: %s", page_num, e)
-        return []
+        return [], empty_debug
     if not words:
-        return []
+        return [], empty_debug
     tol = _MEMZUC_ROW_Y_TOLERANCE
 
-    # Kelimeleri y'ye göre satırlara grupla (top ortalaması satır anahtarı)
+    # Doluluk Oranı sütununun x0'ı (başlıktan); yanlış sütundan 2/7 gelmesin
+    doluluk_x0 = _find_doluluk_column_x0(words)
+
+    # Kelimeleri y'ye göre satırlara grupla
     by_row: Dict[float, List[Dict]] = {}
     for w in words:
         text = (w.get("text") or "").strip()
         if not text:
             continue
         top = float(w.get("top", 0))
-        # Aynı satıra yuvarla
         row_key = round(top / tol) * tol
         by_row.setdefault(row_key, []).append(w)
 
-    # Satırları y'ye göre sırala
     row_keys_sorted = sorted(by_row.keys())
-    # Dönem marker'ları: 20xx/yy içeren kelime
     period_at_top: List[Tuple[float, str]] = []
     for rk in row_keys_sorted:
         row_words = by_row[rk]
@@ -631,31 +672,26 @@ def _extract_memzuc_doluluk_from_page_words(page, page_num: int) -> List[str]:
                     period_at_top.append((rk, period_norm))
                     break
     period_at_top.sort(key=lambda x: x[0])
-    # Sayfada dönem yoksa çık (dönem atayamayız)
     if not period_at_top:
-        return []
+        return [], {**empty_debug, "periods_found": []}
     first_period_top = period_at_top[0][0]
     first_period_str = period_at_top[0][1]
+    periods_found = list({p[1] for p in period_at_top})
 
-    # (period, row_name) -> max doluluk (üst özet 20/22, ana blok 2/7 aynı sayfada; max doğru)
     merged: Dict[Tuple[str, str], int] = {}
     for rk in row_keys_sorted:
         row_words = by_row[rk]
         row_top = min(float(w.get("top", 0)) for w in row_words)
-        # Dönem: satır dönem başlığının altındaysa "önceki en son dönem"; ÜST ÖZET tablosu
-        # dönem başlığının üstünde olduğu için onlara sayfadaki ilk dönemi ver
         period = None
         if row_top >= first_period_top:
             for pt, pstr in period_at_top:
                 if pt <= row_top:
                     period = pstr
         else:
-            # Satır ilk dönem başlığının üstünde (üst özet tablo) -> aynı sayfadaki ilk dönem
             period = first_period_str
         if not period:
             continue
 
-        # Soldaki metin: x0'a göre sıralı ilk kelimeler (satır adı)
         row_words_sorted = sorted(row_words, key=lambda w: float(w.get("x0", 0)))
         left_parts = []
         for w in row_words_sorted[:10]:
@@ -667,9 +703,8 @@ def _extract_memzuc_doluluk_from_page_words(page, page_num: int) -> List[str]:
         if not row_name:
             continue
 
-        # Doluluk: en sağdaki 0-100 arası sayı (Doluluk sütunu en sağda).
-        # PDF'te "20" bazen "2" ve "0" iki kelime olarak gelir; bitişik rakam kelimelerini birleştir.
-        doluluk = _rightmost_doluluk_from_row_words(row_words_sorted)
+        # Sadece Doluluk Oranı sütunundaki sayıyı al (x0 >= doluluk_x0 - 10)
+        doluluk = _doluluk_from_row_words_in_column(row_words_sorted, doluluk_x0, margin=10.0)
         if doluluk is None:
             continue
 
@@ -680,19 +715,31 @@ def _extract_memzuc_doluluk_from_page_words(page, page_num: int) -> List[str]:
         f"MEMZUC_DOLULUK | dönem: {p} | kalem: {rn} | doluluk: {d}"
         for (p, rn), d in merged.items()
     ]
-    return lines_out
+    debug_out = {
+        "doluluk_x0": doluluk_x0,
+        "periods_found": periods_found,
+        "extracted_rows_count": len(lines_out),
+    }
+    return lines_out, debug_out
 
 
 def _page_has_memzuc_signal(free_text: Optional[str]) -> bool:
-    """Sayfa metninde memzuc doluluk sinyali var mı."""
+    """
+    Memzuc sayfası sinyali (gevşek): words parser'ın kesin çalışması için.
+    True döner: 'Doluluk' geçiyorsa VEYA 'KREDİ GRUBU FİRMA MEMZUC' geçiyorsa VEYA 20xx/yy dönem kalıbı varsa.
+    """
     if not free_text or not str(free_text).strip():
         return False
     t = str(free_text).strip()
-    hay = t.upper()
-    return any(
-        sig in hay or sig in t
-        for sig in _MEMZUC_DOLULUK_SIGNALS
-    )
+    hay = _tr_lower(t)
+    hay_upper = t.upper()
+    if "doluluk" in hay:
+        return True
+    if "KREDİ GRUBU FİRMA MEMZUC" in hay_upper or "KREDİ GRUBU FİRMA MEMZUÇ" in hay_upper:
+        return True
+    if _MEMZUC_DOLULUK_PERIOD_RE.search(t):
+        return True
+    return False
 
 
 def _parse_memzuc_doluluk_from_text(text: str) -> List[str]:
@@ -789,6 +836,7 @@ class CreditIntelligencePDFExtractor:
 
         pages_data: List[_PageData] = []
         memzuc_lines_from_words: List[str] = []
+        memzuc_words_debug: Dict[str, Any] = {}
 
         try:
             with pdfplumber.open(file_path) as pdf:
@@ -797,11 +845,26 @@ class CreditIntelligencePDFExtractor:
                     pd = self._process_page(page, page_num, warnings)
                     pages_data.append(pd)
                     tables_per_page.append({"page": page_num, "count": pd.table_count})
-                    # Memzuc doluluk: extract_words ile (doluluk = en sağdaki sayı, üst özet doğru)
+                    # Memzuc doluluk: gevşek sinyal ile words parser (Doluluk sütunu x0 referanslı)
                     if _page_has_memzuc_signal(pd.free_text):
-                        word_lines = _extract_memzuc_doluluk_from_page_words(page, page_num)
+                        word_lines, page_debug = _extract_memzuc_doluluk_from_page_words(
+                            page, page_num
+                        )
                         if word_lines:
                             memzuc_lines_from_words.extend(word_lines)
+                            memzuc_words_debug = {
+                                "words_parser_used": True,
+                                "doluluk_x0": page_debug.get("doluluk_x0"),
+                                "periods_found": page_debug.get("periods_found", []),
+                                "extracted_rows_count": len(memzuc_lines_from_words),
+                            }
+                            logger.info(
+                                "Memzuc words parser page %s: doluluk_x0=%s periods_found=%s rows=%s",
+                                page_num,
+                                page_debug.get("doluluk_x0"),
+                                page_debug.get("periods_found"),
+                                len(word_lines),
+                            )
                         else:
                             memzuc_lines_from_words.extend(
                                 _parse_memzuc_doluluk_from_text(pd.free_text or "")
@@ -823,7 +886,22 @@ class CreditIntelligencePDFExtractor:
             memzuc_fallback = _collect_memzuc_doluluk_from_pages(pages_data)
         if memzuc_fallback:
             sections["memzuc_doluluk_fallback"] = memzuc_fallback
-            logger.info("Memzuc doluluk text fallback: %s satır", len(memzuc_fallback))
+            if memzuc_words_debug:
+                memzuc_words_debug["extracted_rows_count"] = len(memzuc_fallback)
+            logger.info(
+                "Memzuc doluluk: %s satır (words_parser_used=%s)",
+                len(memzuc_fallback),
+                memzuc_words_debug.get("words_parser_used", False),
+            )
+
+        debug_payload: Dict[str, Any] = {
+            "section_hits": section_hits,
+            "tables_found_per_page": tables_per_page,
+            "spill_merges": spill_merges,
+            "warnings": warnings,
+        }
+        if memzuc_lines_from_words and memzuc_words_debug:
+            debug_payload["memzuc_words_parser"] = memzuc_words_debug
 
         return {
             "doc_type": "İstihbarat Raporu",
@@ -833,12 +911,7 @@ class CreditIntelligencePDFExtractor:
                 "pages": total_pages,
             },
             "sections": sections,
-            "debug": {
-                "section_hits": section_hits,
-                "tables_found_per_page": tables_per_page,
-                "spill_merges": spill_merges,
-                "warnings": warnings,
-            },
+            "debug": debug_payload,
         }
 
     # --------------------------------------------------------- page processing
