@@ -529,8 +529,11 @@ _MEMZUC_DOLULUK_ROW_NAMES = (
 )
 # Satır gruplama: aynı y'ye yakın kelimeler aynı satır (tolerance pt)
 _MEMZUC_ROW_Y_TOLERANCE = 4
-# Crop A: ANA FİRMA DAHİL tablosu (header_top .. header_top+240) — sadece Toplam Nakdi / Toplam GN
-_MEMZUC_CROP_A_HEIGHT = 240
+# Crop A: ANA FİRMA DAHİL tablosu (header_top .. header_top+320) — Toplam Nakdi/GN satırları kesin içerde
+_MEMZUC_CROP_A_HEIGHT = 320
+# Crop B: üst özet bandı max sayfa yüksekliğinin %30'u ile sınırlı
+_MEMZUC_CROP_B_MAX_FRAC = 0.30
+_MEMZUC_CROP_B_ABOVE_HEADER = 10
 # Başlık: sadece bu bulunursa words parser çalışır
 _MEMZUC_HEADER_FOR_CROP = (
     "KREDİ GRUBU FİRMA MEMZUCULARI",
@@ -571,14 +574,21 @@ def _find_memzuc_header_top(words: List[Dict]) -> Optional[float]:
     return None
 
 
-def _period_in_words(words: List[Dict]) -> Optional[str]:
-    """Kelimeler arasında 20xx/yy dönem kalıbını bulur; yoksa None."""
-    for w in words:
-        txt = (w.get("text") or "").strip()
-        m = _MEMZUC_DOLULUK_PERIOD_RE.search(txt)
-        if m:
-            return (m.group(1) or "").replace(" ", "").strip()
-    return None
+def _period_from_page_text(page) -> str:
+    """
+    Memzuc sayfasında dönemi crop içinden aramıyoruz; sayfa full_text'inden max(20xx/yy) alınır.
+    Böylece 10 ve 13 gibi başka dönemin değerleri yanlış döneme yazılmaz. Bulunamazsa 2025/12.
+    """
+    try:
+        text = page.extract_text() or ""
+    except Exception:
+        return _DEFAULT_MEMZUC_PERIOD
+    periods = [
+        (m.group(1) or "").replace(" ", "").strip()
+        for m in _MEMZUC_DOLULUK_PERIOD_RE.finditer(text)
+    ]
+    periods = [p for p in periods if p]
+    return max(periods) if periods else _DEFAULT_MEMZUC_PERIOD
 
 
 def _merge_memzuc_lines_across_pages(lines: List[str]) -> List[str]:
@@ -752,10 +762,9 @@ def _extract_memzuc_doluluk_from_page_words(
     page, page_num: int
 ) -> Tuple[List[str], Dict[str, Any]]:
     """
-    MEMZUC_DOLULUK üretimini kesin olarak iki crop alanına kısıtlar; bu alanlar dışında üretim yok.
-    Crop A: header_top .. header_top+240 — sadece Toplam Nakdi Kredi, Toplam GN Kredi (25, 3).
-    Crop B: 0 .. header_top (üst band) — sadece TOPLAM, Umumi Limit (22, 20).
-    Dönem: her crop içinde 20xx/yy aranır; yoksa 2025/12. 'Son görülen dönem' kaldırıldı.
+    MEMZUC_DOLULUK üretimini iki crop alanına kısıtlar. Dönem crop içinden aranmaz;
+    sayfa full_text'inden max(20xx/yy) sabitlenir (yoksa 2025/12).
+    Crop A: header_top .. header_top+320 — Toplam Nakdi/GN. Crop B: üst band (header_top-10 veya max %30).
     """
     empty_debug: Dict[str, Any] = {
         "doluluk_x0": None,
@@ -777,11 +786,14 @@ def _extract_memzuc_doluluk_from_page_words(
         logger.debug("Memzuc header KREDİ GRUBU FİRMA MEMZUCULARI not found on page %s", page_num)
         return [], empty_debug
 
-    page_width = getattr(page, "width", 612)
-    all_results: List[Tuple[str, str, int]] = []
-    periods_seen: List[str] = []
+    # Dönem: sayfa full_text'inden max(20xx/yy); crop içinden arama yok (yanlış dönem 10/13 önlenir)
+    period = _period_from_page_text(page)
 
-    # Crop A: (0, header_top, page.width, header_top + 240) — sadece Toplam Nakdi, Toplam GN
+    page_width = getattr(page, "width", 612)
+    page_height = getattr(page, "height", 792)
+    all_results: List[Tuple[str, str, int]] = []
+
+    # Crop A: (0, header_top, page.width, header_top + 320) — sadece Toplam Nakdi, Toplam GN
     try:
         crop_a = page.crop((0, header_top, page_width, header_top + _MEMZUC_CROP_A_HEIGHT))
         words_a = crop_a.extract_words() or []
@@ -789,30 +801,29 @@ def _extract_memzuc_doluluk_from_page_words(
         logger.debug("Memzuc crop A page %s: %s", page_num, e)
         words_a = []
     if words_a:
-        period_a = _period_in_words(words_a) or _DEFAULT_MEMZUC_PERIOD
-        periods_seen.append(period_a)
-        for t in _parse_memzuc_crop(words_a, _CROP_A_ROW_NAMES, period_a, "A"):
+        for t in _parse_memzuc_crop(words_a, _CROP_A_ROW_NAMES, period, "A"):
             all_results.append(t)
     end_crop_a = header_top + _MEMZUC_CROP_A_HEIGHT
 
-    # Crop B: (0, 0, page.width, header_top) — üst band, sadece TOPLAM, Umumi Limit
+    # Crop B: üst özet bandı — (0, 0, page.width, min(header_top-10, page.height*0.30))
+    crop_b_bottom = min(
+        max(0.0, header_top - _MEMZUC_CROP_B_ABOVE_HEADER),
+        page_height * _MEMZUC_CROP_B_MAX_FRAC,
+    )
     try:
-        crop_b = page.crop((0, 0, page_width, header_top))
+        crop_b = page.crop((0, 0, page_width, crop_b_bottom))
         words_b = crop_b.extract_words() or []
     except Exception as e:
         logger.debug("Memzuc crop B page %s: %s", page_num, e)
         words_b = []
     if words_b:
-        period_b = _period_in_words(words_b) or _DEFAULT_MEMZUC_PERIOD
-        if period_b not in periods_seen:
-            periods_seen.append(period_b)
-        for t in _parse_memzuc_crop(words_b, _CROP_B_ROW_NAMES, period_b, "B"):
+        for t in _parse_memzuc_crop(words_b, _CROP_B_ROW_NAMES, period, "B"):
             all_results.append(t)
 
     # (period, row_name) -> max doluluk (aynı kalem iki crop'tan gelirse)
     merged: Dict[Tuple[str, str], int] = {}
-    for period, row_name, doluluk in all_results:
-        key = (period, row_name)
+    for p, row_name, doluluk in all_results:
+        key = (p, row_name)
         merged[key] = max(merged.get(key, 0), doluluk)
 
     lines_out = [
@@ -821,7 +832,7 @@ def _extract_memzuc_doluluk_from_page_words(
     ]
     debug_out = {
         "doluluk_x0": None,
-        "periods_found": list(dict.fromkeys(periods_seen)),
+        "periods_found": [period],
         "extracted_rows_count": len(lines_out),
         "memzuc_bbox_top": header_top,
         "memzuc_bbox_bottom": end_crop_a,
