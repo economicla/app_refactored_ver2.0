@@ -423,13 +423,43 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         re.IGNORECASE,
     )
 
+    def _normalize_memzuc_kalem(self, kalem: str) -> Optional[str]:
+        """Kalem adını canonical isme çevirir; üst özet tablodan gelen Umumi Limit / TOPLAM da dahil edilir."""
+        k = (kalem or "").strip()
+        if not k:
+            return None
+        k_lo = k.lower()
+        if "umumi" in k_lo and "limit" in k_lo:
+            return "Umumi Limit"
+        if "toplam" in k_lo and "nakdi" in k_lo and "kredi" in k_lo:
+            return "Toplam Nakdi Kredi"
+        if "toplam" in k_lo and "gn" in k_lo and "kredi" in k_lo:
+            return "Toplam GN Kredi"
+        if k_lo == "toplam":
+            return "TOPLAM"
+        # Tam eşleşme
+        for row_name in self._MEMZUC_ROW_NAMES:
+            if row_name.lower() == k_lo:
+                return row_name
+        return None
+
+    def _merge_memzuc_value(
+        self, result: Dict[str, Dict[str, int]], period: str, kalem: str, pct: int
+    ) -> None:
+        """Aynı (dönem, kalem) için birden fazla değer gelirse max ile merge et (üst özet vs ana blok)."""
+        norm = self._normalize_memzuc_kalem(kalem)
+        if not norm:
+            return
+        existing = result.setdefault(period, {}).get(norm)
+        result[period][norm] = max(existing, pct) if existing is not None else pct
+
     def _parse_memzuc_doluluk_from_contents(
         self, contents: List[Dict[str, str]]
     ) -> Dict[str, Dict[str, int]]:
         """
         get_memzuc_lines ile alınan content'lerden dönem bazlı doluluk oranlarını çıkar.
-        Önce MEMZUC_DOLULUK | dönem: X | kalem: Y | doluluk: Z formatını parse eder;
-        yoksa dönem bloğu + satır adı + satır sonu yüzde ile parse eder.
+        Aynı (dönem, kalem) için birden fazla değer gelirse max merge (üst özet + ana firma dahil).
+        Önce MEMZUC_DOLULUK satırlarını parse eder; yoksa dönem bloğu fallback.
         Returns: { "2025/12": {"Umumi Limit": 20, "Toplam Nakdi Kredi": 25, ...}, ... }
         """
         combined = "\n".join((item.get("content") or "").replace("\r", "\n") for item in contents)
@@ -445,10 +475,10 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             except ValueError:
                 continue
             if period_norm and kalem:
-                result.setdefault(period_norm, {})[kalem] = pct
+                self._merge_memzuc_value(result, period_norm, kalem, pct)
         if result:
             return result
-        # 2) Fallback: dönem başlığı + blok içinde satır adı + satır sonu yüzde
+        # 2) Fallback: dönem başlığı + blok içinde satır adı + satır sonu yüzde (merge ile)
         period_positions = list(self._MEMZUC_PERIOD_RE.finditer(combined))
         for i, m in enumerate(period_positions):
             period_raw = (m.group("period") or "").strip()
@@ -466,7 +496,8 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                         pct_m = re.search(r"\d{1,2}\s*$", line_clean)
                         if pct_m:
                             try:
-                                result.setdefault(period_norm, {})[row_name] = int(pct_m.group(0).strip())
+                                pct_val = int(pct_m.group(0).strip())
+                                self._merge_memzuc_value(result, period_norm, row_name, pct_val)
                             except ValueError:
                                 pass
                         break
