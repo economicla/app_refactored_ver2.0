@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
 İstihbarat raporu PDF'ini extract edip debug çıktısını (memzuc dahil) yazdırır.
-Kullanım (proje kökünden):
+Kullanım:
   python scripts/extract_debug.py path/to/rapor.pdf
+  (backend/app_refactored veya proje kökünden çalıştırılabilir)
 """
 import json
 import sys
 from pathlib import Path
 
-# Proje kökünü path'e ekle
-_root = Path(__file__).resolve().parent.parent
-if str(_root) not in sys.path:
-    sys.path.insert(0, str(_root))
+# app_refactored paketinin bulunması için: script'in olduğu dizinin 2 üstü (backend)
+_script_dir = Path(__file__).resolve().parent
+_app_refactored_dir = _script_dir.parent
+_backend_dir = _app_refactored_dir.parent
+for _d in (_backend_dir, _app_refactored_dir):
+    if str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
 
 from app_refactored.structured_extractors import CreditIntelligencePDFExtractor
 
