@@ -534,6 +534,8 @@ _MEMZUC_CROP_A_HEIGHT = 320
 # Crop B: üst özet bandı max sayfa yüksekliğinin %30'u ile sınırlı
 _MEMZUC_CROP_B_MAX_FRAC = 0.30
 _MEMZUC_CROP_B_ABOVE_HEADER = 10
+# Crop B'de doluluk_x0 arama kaldırıldı; doluluk sütunu sağ bant ile: width * ratio (0.85 veya 0.82)
+_CROP_B_DOLULUK_BAND_RATIO = 0.85
 # Başlık: sadece bu bulunursa words parser çalışır
 _MEMZUC_HEADER_FOR_CROP = (
     "KREDİ GRUBU FİRMA MEMZUCULARI",
@@ -722,13 +724,20 @@ def _parse_memzuc_crop(
     allowed_row_names: Tuple[str, ...],
     period: str,
     crop_label: str,
+    doluluk_band_x0: Optional[float] = None,
 ) -> List[Tuple[str, str, int]]:
     """
     Tek crop'tan (words) sadece allowed_row_names kalemlerini çıkarır; her biri için (period, row_name, doluluk).
-    period crop içinde bulunamadıysa zaten 2025/12 verilmiş olmalı.
+    doluluk_band_x0 verilirse (Crop B): doluluk_x0 arama yok, sadece x0 >= doluluk_band_x0 olan numeric
+    tokenlar aday; 0-100 arası doluluk seçilir (Umumi 20, TOPLAM 22). Verilmezse (Crop A) mevcut doluluk_x0.
     """
     tol = _MEMZUC_ROW_Y_TOLERANCE
-    doluluk_x0 = _find_doluluk_column_x0(words)
+    if doluluk_band_x0 is not None:
+        doluluk_x0 = doluluk_band_x0
+        margin = 0.0
+    else:
+        doluluk_x0 = _find_doluluk_column_x0(words)
+        margin = 10.0
     by_row: Dict[float, List[Dict]] = {}
     for w in words:
         text = (w.get("text") or "").strip()
@@ -751,7 +760,7 @@ def _parse_memzuc_crop(
         row_name = _normalize_memzuc_row_name(left_text)
         if not row_name or row_name not in allowed_row_names:
             continue
-        doluluk = _doluluk_from_row_words_in_column(row_words_sorted, doluluk_x0, margin=10.0)
+        doluluk = _doluluk_from_row_words_in_column(row_words_sorted, doluluk_x0, margin=margin)
         if doluluk is None:
             continue
         out.append((period, row_name, doluluk))
@@ -817,7 +826,10 @@ def _extract_memzuc_doluluk_from_page_words(
         logger.debug("Memzuc crop B page %s: %s", page_num, e)
         words_b = []
     if words_b:
-        for t in _parse_memzuc_crop(words_b, _CROP_B_ROW_NAMES, period, "B"):
+        doluluk_band_x0_b = page_width * _CROP_B_DOLULUK_BAND_RATIO
+        for t in _parse_memzuc_crop(
+            words_b, _CROP_B_ROW_NAMES, period, "B", doluluk_band_x0=doluluk_band_x0_b
+        ):
             all_results.append(t)
 
     # (period, row_name) -> max doluluk (aynı kalem iki crop'tan gelirse)
