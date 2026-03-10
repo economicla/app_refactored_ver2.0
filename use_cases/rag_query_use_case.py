@@ -4,6 +4,7 @@ Business Logic - Framework bağımsız
 Advanced preprocessing, intelligent chunking, source tracking ve compliance
 """
 
+import json
 import logging
 import re
 from typing import Optional, List, Dict, Tuple, Any
@@ -436,6 +437,46 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         r"MEMZUC_DOLULUK\s*\|\s*dönem:\s*(\S+)\s*\|\s*kalem:\s*([^|]+?)\s*\|\s*doluluk:\s*(\d+)",
         re.IGNORECASE,
     )
+    # Extractor ile aynı: sadece bu section_type grup tablosu; diğer tablolar (ortak, KKB vb.) karışmaz
+    _MEMZUC_SECTION_TYPE_GRUP = "kredi_grubu_firma_memzuclari"
+
+    def _parse_memzuc_structured_json_from_contents(
+        self, contents: List[Dict[str, str]]
+    ) -> Optional[Dict[str, Dict[str, int]]]:
+        """
+        Chunk'lardan MEMZUC_STRUCTURED_JSON bloğunu bulur, sadece grup tablosu (section_type
+        kredi_grubu_firma_memzuclari) için data_by_period döner. Böylece ortak/KKB/tek firma
+        tabloları hiç karışmaz.
+        Returns: {"2025/12": {"Umumi Limit": 20, ...}, "2024/12": {...}} veya None.
+        """
+        combined = "\n".join((item.get("content") or "").replace("\r", "\n") for item in contents)
+        idx = combined.find("MEMZUC_STRUCTURED_JSON")
+        if idx == -1:
+            return None
+        rest = combined[idx:]
+        newline = rest.find("\n")
+        if newline == -1:
+            return None
+        json_str = rest[newline + 1 :].strip()
+        # Tek satır JSON (extractor json.dumps ile tek satır yazıyor)
+        first_line = json_str.split("\n")[0].strip()
+        if not first_line.startswith("["):
+            return None
+        try:
+            payload = json.loads(first_line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, list):
+            return None
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            if item.get("section_type") != self._MEMZUC_SECTION_TYPE_GRUP:
+                continue
+            data = item.get("data_by_period")
+            if isinstance(data, dict):
+                return data
+        return None
 
     def _normalize_memzuc_kalem(self, kalem: str) -> Optional[str]:
         """Kalem adını canonical isme çevirir; üst özet tablodan gelen Umumi Limit / TOPLAM da dahil edilir."""
@@ -1777,8 +1818,11 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     )
                     if not memzuc_chunks and preferred_filename:
                         memzuc_chunks = await get_memzuc_lines(filename=None, doc_type="İstihbarat Raporu")
-                    period_to_data = self._parse_memzuc_doluluk_from_contents(memzuc_chunks)
-                    periods_found = sorted(period_to_data.keys())
+                    # Önce yapılandırılmış JSON'dan oku (sadece grup tablosu; ortak/KKB/tek firma karışmaz)
+                    period_to_data = self._parse_memzuc_structured_json_from_contents(memzuc_chunks)
+                    if not period_to_data:
+                        period_to_data = self._parse_memzuc_doluluk_from_contents(memzuc_chunks)
+                    periods_found = sorted(period_to_data.keys()) if period_to_data else []
                     requested_period = self._extract_requested_period_from_query(query.query)
                     selected_period, exact_match = self._select_closest_period(
                         requested_period, periods_found
