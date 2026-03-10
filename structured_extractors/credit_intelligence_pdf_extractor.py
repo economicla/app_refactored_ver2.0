@@ -11,6 +11,7 @@ Primary library: pdfplumber (tables).  PyMuPDF fallback for free text.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -521,6 +522,33 @@ _MEMZUC_LINE_RE = re.compile(
     r"MEMZUC_DOLULUK\s*\|\s*dönem:\s*(\S+)\s*\|\s*kalem:\s*([^|]+?)\s*\|\s*doluluk:\s*(\d+)",
     re.IGNORECASE,
 )
+# RAG'da tek kaynak: sadece bu section_type için grup doluluk kullanılır; diğer tablolar karışmaz
+MEMZUC_SECTION_TYPE_GRUP = "kredi_grubu_firma_memzuclari"
+
+# Memzuç bölümünün tamamı için section_type'lar (fotoğraflara göre)
+MEMZUC_SECTION_TYPES = (
+    "kredi_grubu_firma_memzuclari",   # KREDİ GRUBU FİRMA MEMZUÇLARI (ANA FİRMA DAHİL)
+    "grup_ana_firma_memzucu",         # GRUP ANA FİRMA MEMZUCU — tek firma (Aktül Kağıt vb.)
+    "ortagi_oldugu_sirketlerin_memzuclari",  # ORTAĞI OLDUĞU ŞİRKETLERİN MEMZUÇLARI
+    "kkb_ekrani_iliskili_firma_memzuclari", # KKB EKRANI İLİŞKİLİ FİRMA MEMZUÇLARI
+    "grup_firmalari_ve_iliskili_memzuclari", # GRUP FİRMALARI VE İLİŞKİ/YAKINLIK BULUNAN FİRMALARIN MEMZUÇLARI
+    "konsolide_memzuc_krm",           # KONSOLİDE MEMZUÇ/KRM KARŞILAŞTIRMA (farklı tablo yapısı)
+)
+# Başlık metni → (section_type, entity_override). entity_override None ise satırdan/sonraki satırdan çıkarılır.
+_MEMZUC_SECTION_HEADER_PATTERNS: List[Tuple[str, str, Optional[str]]] = [
+    ("KREDİ GRUBU FİRMA MEMZUÇLARI", MEMZUC_SECTION_TYPE_GRUP, "grup"),
+    ("KREDİ GRUBU FİRMA MEMZUCULARI", MEMZUC_SECTION_TYPE_GRUP, "grup"),
+    ("MEMZUÇLARI (ANA FİRMA DAHİL)", MEMZUC_SECTION_TYPE_GRUP, "grup"),
+    ("GRUP ANA FİRMA MEMZUCU", "grup_ana_firma_memzucu", None),  # entity: aynı/sonraki satırda firma adı
+    ("ORTAĞI OLDUĞU ŞİRKETLERİN MEMZUÇLARI", "ortagi_oldugu_sirketlerin_memzuclari", "ortak_sirketler"),
+    ("ORTAĞI OLDUĞU ŞİRKETLERİN MEMZUCULARI", "ortagi_oldugu_sirketlerin_memzuclari", "ortak_sirketler"),
+    ("KKB EKRANI İLİŞKİLİ FİRMA MEMZUÇLARI", "kkb_ekrani_iliskili_firma_memzuclari", None),
+    ("KKB EKRANI İLİŞKİLİ FİRMA MEMZUCULARI", "kkb_ekrani_iliskili_firma_memzuclari", None),
+    ("GRUP FİRMALARI VE İLİŞKİ", "grup_firmalari_ve_iliskili_memzuclari", "grup_ve_iliskili"),
+    ("GRUP FİRMALARI VE İLİŞKİ/YAKINLIK BULUNAN FİRMALARIN MEMZUÇLARI", "grup_firmalari_ve_iliskili_memzuclari", "grup_ve_iliskili"),
+    ("KONSOLİDE MEMZUÇ/KRM KARŞILAŞTIRMA", "konsolide_memzuc_krm", "konsolide"),
+]
+
 _MEMZUC_DOLULUK_ROW_NAMES = (
     "Umumi Limit",
     "Toplam Nakdi Kredi",
@@ -1089,6 +1117,175 @@ def _page_has_memzuc_signal(free_text: Optional[str]) -> bool:
     return _page_has_group_memzuc_signal(free_text)
 
 
+def _build_memzuc_structured_from_fallback(fallback_lines: List[str]) -> List[Dict[str, Any]]:
+    """
+    MEMZUC_DOLULUK satırlarını tek kaynaklı yapılandırılmış JSON'a dönüştürür.
+    Bu satırlar sadece grup tablosundan (kredi_grubu_firma_memzuclari) gelir; RAG bu JSON'dan
+    section_type + dönem ile doğru veriyi seçer, başka tablolarla karışmaz.
+    """
+    data_by_period: Dict[str, Dict[str, int]] = {}
+    for line in (fallback_lines or []):
+        m = _MEMZUC_LINE_RE.search(line)
+        if not m:
+            continue
+        period_raw = (m.group(1) or "").strip().replace(" ", "")
+        kalem = (m.group(2) or "").strip()
+        try:
+            doluluk = int((m.group(3) or "0").strip())
+        except (ValueError, TypeError):
+            continue
+        if period_raw not in data_by_period:
+            data_by_period[period_raw] = {}
+        data_by_period[period_raw][kalem] = doluluk
+    if not data_by_period:
+        return []
+    return [
+        {
+            "section_type": MEMZUC_SECTION_TYPE_GRUP,
+            "entity": "grup",
+            "data_by_period": data_by_period,
+        }
+    ]
+
+
+def _parse_memzuc_section_text_to_data(text: str) -> Dict[str, Dict[str, int]]:
+    """
+    Bir memzuç bölümü metninden dönem bazlı doluluk verisi çıkarır.
+    Returns: { "2025/12": {"Umumi Limit": 20, "Toplam Nakdi Kredi": 25, ...}, ... }
+    """
+    data_by_period: Dict[str, Dict[str, int]] = {}
+    normalized = (text or "").replace("\r", "\n")
+    period_matches = list(_MEMZUC_DOLULUK_PERIOD_RE.finditer(normalized))
+    for i, m in enumerate(period_matches):
+        period_raw = (m.group(1) or "").strip().replace(" ", "")
+        start = m.end()
+        end = period_matches[i + 1].start() if i + 1 < len(period_matches) else len(normalized)
+        block = normalized[start:end]
+        block_lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+        for row_name in _MEMZUC_DOLULUK_ROW_NAMES:
+            row_lower = row_name.lower()
+            last_match_line: Optional[str] = None
+            for line in block_lines:
+                if row_lower in line.lower():
+                    last_match_line = line
+            if last_match_line:
+                nums = re.findall(r"\b\d{1,2}\b", last_match_line)
+                if nums:
+                    try:
+                        pct = int(nums[-1])
+                    except (ValueError, TypeError):
+                        continue
+                    if period_raw not in data_by_period:
+                        data_by_period[period_raw] = {}
+                    data_by_period[period_raw][row_name] = pct
+    return data_by_period
+
+
+def _extract_entity_from_memzuc_header_line(
+    header_line: str, next_line: Optional[str], section_type: str
+) -> str:
+    """Başlık veya sonraki satırdan entity (firma adı vb.) çıkarır."""
+    if section_type == MEMZUC_SECTION_TYPE_GRUP:
+        return "grup"
+    if section_type == "ortagi_oldugu_sirketlerin_memzuclari":
+        return "ortak_sirketler"
+    if section_type == "grup_firmalari_ve_iliskili_memzuclari":
+        return "grup_ve_iliskili"
+    if section_type == "konsolide_memzuc_krm":
+        return "konsolide"
+    # grup_ana_firma_memzucu, kkb_ekrani_iliskili: firma adı "BankaSayisi: N)" sonrası veya sonraki satırda
+    line = (header_line + " " + (next_line or "")).strip()
+    m_banka = re.search(r"BankaSayisi\s*:\s*\d+\s*\)\s*(.+)", line, re.IGNORECASE)
+    if m_banka:
+        rest = m_banka.group(1).strip()
+        if rest:
+            return rest.split("-")[0].strip()[:80] or "bilinmiyor"
+    for sep in ("ANONİM ŞİRKETİ", "A.Ş.", "A.Ş ", "LTD", "LİMİTED"):
+        if sep in line.upper():
+            idx = line.upper().find(sep)
+            # Firma adı genelde A.Ş. öncesi kelimeler (örn. "AKTÜL KAĞIT ÜRETİM PAZARLAMA A.Ş.")
+            before = line[:idx].strip().split()
+            if before:
+                return " ".join(before[-4:] if len(before) >= 4 else before)[:80] or "bilinmiyor"
+    if next_line and next_line.strip():
+        return next_line.strip()[:80]
+    return "bilinmiyor"
+
+
+def _extract_all_memzuc_sections_from_pages(pages: List["_PageData"]) -> List[Dict[str, Any]]:
+    """
+    Tüm sayfalardaki memzuç bölümlerini tarar; her bölüm tipi için section_type, entity ve
+    data_by_period (doluluk) üretir. Sadece grup tablosu için words-based veri kullanılacak;
+    diğer bölümler bu fonksiyondan gelir.
+    """
+    combined_parts: List[str] = []
+    for pd in pages:
+        text = (
+            getattr(pd, "free_text", None)
+            or getattr(pd, "page_text", None)
+            or getattr(pd, "raw_text", None)
+        )
+        if text and str(text).strip():
+            combined_parts.append(str(text).strip())
+    full_text = "\n\n".join(combined_parts)
+    if not full_text.strip():
+        return []
+    hay = full_text.upper()
+    # Memzuç bölümü dışına çıkmamak için MEMZUÇ BİLGİLERİ veya ilk section header'dan başla
+    start_marker = "MEMZUÇ BİLGİLERİ"
+    if start_marker not in hay and "MEMZUC BİLGİLERİ" not in hay:
+        start_marker = "MEMZUC BİLGİLERİ"
+    try_start = hay.find(start_marker)
+    if try_start == -1:
+        try_start = 0
+    search_text = full_text[try_start:]
+    search_upper = search_text.upper()
+
+    sections_out: List[Dict[str, Any]] = []
+    # Her pattern için ilk geçtiği yeri bul; (pos, section_type, entity) listesi yap, pos'a göre sırala
+    hits: List[Tuple[int, str, Optional[str], Optional[str]]] = []
+    for pattern, section_type, entity_override in _MEMZUC_SECTION_HEADER_PATTERNS:
+        idx = search_upper.find(pattern.upper())
+        if idx == -1:
+            continue
+        # Aynı pattern birden fazla sayfada olabilir (örn. grup + tek firma); ilk eşleşmede kes
+        line_end = search_text[idx:].find("\n")
+        if line_end == -1:
+            line_end = len(search_text) - idx
+        header_line = search_text[idx : idx + line_end].strip()
+        next_start = idx + line_end + 1
+        next_line = None
+        if next_start < len(search_text):
+            next_line_end = search_text[next_start:].find("\n")
+            if next_line_end != -1:
+                next_line = search_text[next_start : next_start + next_line_end].strip()
+            else:
+                next_line = search_text[next_start:].strip()
+        entity = entity_override if entity_override else _extract_entity_from_memzuc_header_line(
+            header_line, next_line, section_type
+        )
+        hits.append((idx, section_type, entity, header_line))
+    # Aynı section_type birden fazla sayfada geçebilir; her benzersiz (section_type + entity) için bir kez işle, ilk geçtiği yeri kullan
+    seen: Dict[Tuple[str, str], int] = {}
+    for idx, section_type, entity, header_line in sorted(hits, key=lambda x: x[0]):
+        key = (section_type, entity)
+        if key in seen and seen[key] != idx:
+            continue
+        seen[key] = idx
+        # Bu bölümün metni: bu başlıktan bir sonraki başlığa (veya metin sonuna)
+        next_hit = min((h[0] for h in hits if h[0] > idx), default=len(search_text))
+        section_slice = search_text[idx:next_hit]
+        data_by_period = _parse_memzuc_section_text_to_data(section_slice)
+        if not data_by_period and section_type == "konsolide_memzuc_krm":
+            continue
+        sections_out.append({
+            "section_type": section_type,
+            "entity": entity,
+            "data_by_period": data_by_period,
+        })
+    return sections_out
+
+
 def _parse_memzuc_doluluk_from_text(text: str) -> List[str]:
     """
     Metinde dönem (20xx/yy) bloklarını bulur; her blokta her kalem için **son** eşleşen satırdaki
@@ -1283,6 +1480,26 @@ class CreditIntelligencePDFExtractor:
                 "Memzuc doluluk: %s satır (words_parser_used=%s)",
                 len(memzuc_fallback),
                 memzuc_words_debug.get("words_parser_used", False),
+            )
+        # Memzuç bölümünün tamamı: tek JSON (grup + grup_ana_firma, ortagi_oldugu, kkb_iliskili vb.)
+        group_from_fallback = (
+            _build_memzuc_structured_from_fallback(memzuc_fallback) if memzuc_fallback else []
+        )
+        all_memzuc_sections = _extract_all_memzuc_sections_from_pages(pages_data)
+        memzuc_structured_list: List[Dict[str, Any]] = list(group_from_fallback)
+        for s in all_memzuc_sections:
+            if s["section_type"] != MEMZUC_SECTION_TYPE_GRUP:
+                memzuc_structured_list.append(s)
+            elif not any(
+                x["section_type"] == MEMZUC_SECTION_TYPE_GRUP for x in memzuc_structured_list
+            ):
+                memzuc_structured_list.append(s)
+        if memzuc_structured_list:
+            sections["memzuc_structured"] = memzuc_structured_list
+            logger.info(
+                "Memzuc structured: %s bölüm (section_types: %s)",
+                len(memzuc_structured_list),
+                [x.get("section_type") for x in memzuc_structured_list],
             )
 
         debug_payload: Dict[str, Any] = {
@@ -2146,6 +2363,12 @@ def render_structured_text(data: Dict) -> str:
         for line in memzuc_doluluk:
             parts.append(line)
         parts.append("")
+
+    # Yapılandırılmış memzuç: RAG tek kaynaktan (section_type + dönem) doğru tabloyu seçer
+    memzuc_structured = sections.get("memzuc_structured", [])
+    if memzuc_structured and isinstance(memzuc_structured, list):
+        parts.append("## MEMZUC_STRUCTURED_JSON")
+        parts.append(json.dumps(memzuc_structured, ensure_ascii=False))
 
     # Konsolide Memzuç
     kons = sections.get("konsolide_memzuc", {})
