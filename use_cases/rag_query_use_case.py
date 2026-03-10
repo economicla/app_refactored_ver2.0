@@ -1753,12 +1753,20 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 "uzun vadeli risk", "u.v. risk", "uv risk", "toplam risk", "kısa vadeli riski",
                 "kısa vadeli risk oranı", "k.v risk", "temerrüt", "faiz reeskont",
             )
+            # Tek firma soruluyorsa deterministik doluluk (grup tablosu) kullanma; normal RAG ile o firma chunk'ından cevaplansın
+            _MEMZUC_SINGLE_FIRMA_KEYWORDS = (
+                "aktül kağıt", "aktul kagit", "bahariye mensucat", "bahariye tekstil",
+                "mks marmara", "mustafa latif topbaş", "mustafa latif topbas",
+            )
             is_memzuc_query = (
                 any(kw in q_lo for kw in _MEMZUC_TRIGGER_KEYWORDS)
                 or routing_m.get("matched_rule_id") == "MEMZUC"
             )
+            asks_for_single_firma = any(kw in q_lo for kw in _MEMZUC_SINGLE_FIRMA_KEYWORDS)
             asks_for_risk_or_limit = any(kw in q_lo for kw in _MEMZUC_RISK_KEYWORDS)
-            use_memzuc_doluluk_only = is_memzuc_query and not asks_for_risk_or_limit
+            use_memzuc_doluluk_only = (
+                is_memzuc_query and not asks_for_risk_or_limit and not asks_for_single_firma
+            )
             if use_memzuc_doluluk_only and hasattr(self.document_repository, "get_memzuc_lines"):
                 try:
                     get_memzuc_lines = getattr(self.document_repository, "get_memzuc_lines")
