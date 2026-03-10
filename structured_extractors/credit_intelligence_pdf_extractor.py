@@ -1061,21 +1061,32 @@ def _extract_memzuc_doluluk_from_page_words(
     return lines_out, debug_out, cropb_debug_line
 
 
-def _page_has_memzuc_signal(free_text: Optional[str]) -> bool:
+def _page_has_group_memzuc_signal(free_text: Optional[str]) -> bool:
     """
-    Memzuc words parser sadece bu başlık bulunursa çalışsın; yoksa text fallback.
-    True: sayfa metninde 'KREDİ GRUBU FİRMA MEMZUCULARI' veya 'ANA FİRMA DAHİL' geçiyorsa.
-    Sinyal gevşetme kaldırıldı (Doluluk / 20xx/yy tek başına yeterli değil).
+    Sadece grup toplam tablosu (KREDİ GRUBU FİRMA MEMZUÇLARI - ANA FİRMA DAHİL) için True.
+    Tek firma tablosu (GRUP ANA FİRMA MEMZUCU - Aktül Kağıt vb.) için False; böylece
+    'grubun doluluk oranları' sorulduğunda sadece grup verisi kullanılır.
     """
     if not free_text or not str(free_text).strip():
         return False
     t = str(free_text).strip()
     hay_upper = t.upper()
-    if "KREDİ GRUBU FİRMA MEMZUCULARI" in hay_upper or "KREDİ GRUBU FİRMA MEMZUÇLARI" in hay_upper:
-        return True
-    if "ANA FİRMA DAHİL" in hay_upper:
-        return True
-    return False
+    # Grup tablosu: "MEMZUÇLARI" (çoğul) — Kredi Grubu Firma Memzuçları (tüm grup)
+    has_group = (
+        "KREDİ GRUBU FİRMA MEMZUCULARI" in hay_upper
+        or "KREDİ GRUBU FİRMA MEMZUÇLARI" in hay_upper
+        or "MEMZUÇLARI (ANA FİRMA DAHİL)" in hay_upper
+        or "MEMZUCULARI (ANA FİRMA DAHİL)" in hay_upper
+    )
+    # Tek firma tablosu: "GRUP ANA FİRMA MEMZUCU" + firma adı (MEMZUCU tekil)
+    if "GRUP ANA FİRMA MEMZUCU" in hay_upper and not has_group:
+        return False
+    return has_group
+
+
+def _page_has_memzuc_signal(free_text: Optional[str]) -> bool:
+    """Memzuc words parser: sadece grup tablosu sayfalarında çalışsın."""
+    return _page_has_group_memzuc_signal(free_text)
 
 
 def _parse_memzuc_doluluk_from_text(text: str) -> List[str]:
@@ -1113,8 +1124,9 @@ def _parse_memzuc_doluluk_from_text(text: str) -> List[str]:
 
 def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
     """
-    Tüm sayfalardan free_text/page_text alır; memzuc doluluk sinyali geçen sayfalarda
-    _parse_memzuc_doluluk_from_text çalıştırıp satırları toplar. DB'ye yazılacak format.
+    Tüm sayfalardan free_text alır; sadece grup tablosu (KREDİ GRUBU FİRMA MEMZUÇLARI)
+    sayfalarında _parse_memzuc_doluluk_from_text çalıştırıp satırları toplar.
+    Tek firma (Aktül Kağıt vb.) sayfaları atlanır — grubun doluluk sorusu grup verisiyle cevaplansın.
     """
     all_lines: List[str] = []
     for pd in pages:
@@ -1125,14 +1137,9 @@ def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
         )
         if not (text and str(text).strip()):
             continue
-        t = str(text).strip()
-        hay = t.upper()
-        if not any(
-            sig in hay or sig in t
-            for sig in _MEMZUC_DOLULUK_SIGNALS
-        ):
+        if not _page_has_group_memzuc_signal(text):
             continue
-        page_lines = _parse_memzuc_doluluk_from_text(t)
+        page_lines = _parse_memzuc_doluluk_from_text(str(text).strip())
         all_lines.extend(page_lines)
     return all_lines
 
