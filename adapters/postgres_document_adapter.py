@@ -621,6 +621,7 @@ class PostgresDocumentAdapter(IDocumentRepository):
                 memzuc_cond = text(
                     "("
                     " content ILIKE '%MEMZUC_DOLULUK%'"
+                    " OR content ILIKE '%MEMZUC_STRUCTURED_JSON%'"
                     " OR content ILIKE '%KREDİ GRUBU FİRMA MEMZUCULARI%'"
                     " OR content ILIKE '%MEMZUC BİLGİLERİ%'"
                     " OR content ILIKE '%Doluluk Oranı%'"
