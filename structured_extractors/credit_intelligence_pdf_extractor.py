@@ -2366,6 +2366,9 @@ def render_structured_text(data: Dict) -> str:
 
     # Yapılandırılmış memzuç: RAG tek kaynaktan (section_type + dönem) doğru tabloyu seçer
     memzuc_structured = sections.get("memzuc_structured", [])
+    if (not memzuc_structured or not isinstance(memzuc_structured, list)) and memzuc_doluluk:
+        # Extractor'da boş kalmışsa fallback satırlarından türet (her zaman JSON çıksın)
+        memzuc_structured = _build_memzuc_structured_from_fallback(memzuc_doluluk)
     if memzuc_structured and isinstance(memzuc_structured, list):
         parts.append("## MEMZUC_STRUCTURED_JSON")
         parts.append(json.dumps(memzuc_structured, ensure_ascii=False))
