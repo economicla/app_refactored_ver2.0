@@ -149,6 +149,20 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             ],
             "boost_score": 0.30,
         },
+        # P55: Memzuç (Kredi Grubu Firma Memzuçları) → İstihbarat Raporu (K.V. risk, doluluk vb. bu tabloda)
+        {
+            "rule_id": "MEMZUC",
+            "rule_name": "Memzuç / Kredi Grubu Memzuçları",
+            "priority": 55,
+            "doc_type": "İstihbarat Raporu",
+            "keywords": [
+                "memzuç", "memzuc", "memzuculuk", "memzuçlar", "memzucular",
+                "kredi grubu memzuc", "kredi grubu memzuç", "memzuç veri",
+                "memzuç tablosu", "memzuç dönem",
+            ],
+            "patterns": [],
+            "boost_score": 0.35,
+        },
         # P50: General risk / limit / teminat → Teklif Özeti
         {
             "rule_id": "TEKLIF_OZETI",
