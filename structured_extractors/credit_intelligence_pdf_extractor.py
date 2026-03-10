@@ -1066,22 +1066,22 @@ def _page_has_group_memzuc_signal(free_text: Optional[str]) -> bool:
     Sadece grup toplam tablosu (KREDİ GRUBU FİRMA MEMZUÇLARI - ANA FİRMA DAHİL) için True.
     Tek firma tablosu (GRUP ANA FİRMA MEMZUCU - Aktül Kağıt vb.) için False; böylece
     'grubun doluluk oranları' sorulduğunda sadece grup verisi kullanılır.
+    Sayfada tek firma başlığı varsa o sayfa hiç işlenmez (aynı sayfada her iki tablo olsa bile).
     """
     if not free_text or not str(free_text).strip():
         return False
     t = str(free_text).strip()
     hay_upper = t.upper()
+    # Tek firma tablosu başlığı varsa bu sayfayı atla (Aktül Kağıt vb. sayfaları)
+    if "GRUP ANA FİRMA MEMZUCU" in hay_upper:
+        return False
     # Grup tablosu: "MEMZUÇLARI" (çoğul) — Kredi Grubu Firma Memzuçları (tüm grup)
-    has_group = (
+    return (
         "KREDİ GRUBU FİRMA MEMZUCULARI" in hay_upper
         or "KREDİ GRUBU FİRMA MEMZUÇLARI" in hay_upper
         or "MEMZUÇLARI (ANA FİRMA DAHİL)" in hay_upper
         or "MEMZUCULARI (ANA FİRMA DAHİL)" in hay_upper
     )
-    # Tek firma tablosu: "GRUP ANA FİRMA MEMZUCU" + firma adı (MEMZUCU tekil)
-    if "GRUP ANA FİRMA MEMZUCU" in hay_upper and not has_group:
-        return False
-    return has_group
 
 
 def _page_has_memzuc_signal(free_text: Optional[str]) -> bool:
