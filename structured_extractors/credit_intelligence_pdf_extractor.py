@@ -603,6 +603,32 @@ def _period_from_page_text(page) -> str:
     return max(periods) if periods else _DEFAULT_MEMZUC_PERIOD
 
 
+def _find_period_positions_from_words(
+    words: List[Dict], min_top: float, max_top: float
+) -> List[Tuple[float, str]]:
+    """
+    Kelimeler arasında 20xx/yy formatındaki dönem etiketlerini bulur; (top, period) listesi döner (top'a göre sıralı).
+    Aynı dönem birden fazla kelimede geçerse en üstteki (min top) kullanılır.
+    """
+    seen: Dict[str, float] = {}
+    for w in words:
+        top = float(w.get("top", 0))
+        if not (min_top <= top <= max_top):
+            continue
+        txt = (w.get("text") or "").strip().replace(" ", "")
+        m = _MEMZUC_DOLULUK_PERIOD_RE.match(txt) or _MEMZUC_DOLULUK_PERIOD_RE.search(txt)
+        if not m:
+            continue
+        period = (m.group(1) or "").replace(" ", "").strip()
+        if not period or len(period) < 6:
+            continue
+        if period not in seen or top < seen[period]:
+            seen[period] = top
+    out = [(top, p) for p, top in seen.items()]
+    out.sort(key=lambda x: x[0])
+    return out
+
+
 def _merge_memzuc_lines_across_pages(lines: List[str]) -> List[str]:
     """
     Birden fazla sayfadan gelen MEMZUC_DOLULUK satırlarını (dönem, kalem) bazında birleştirir;
@@ -907,7 +933,7 @@ def _extract_memzuc_doluluk_from_page_words(
     header_top = _find_memzuc_header_top(full_words)
     page_width = getattr(page, "width", 612)
     page_height = getattr(page, "height", 792)
-    period = _period_from_page_text(page)
+    default_period = _period_from_page_text(page)
     all_results: List[Tuple[str, str, int]] = []
     cropb_debug_line: Optional[str] = None
 
@@ -936,13 +962,13 @@ def _extract_memzuc_doluluk_from_page_words(
             return [], empty_debug, None
         # Crop A: ana tablo (TOPLAM, Umumi Limit dahil); sayfa sonunu aşmayacak şekilde
         crop_a_bottom = min(header_top + _MEMZUC_CROP_A_HEIGHT, page_height)
+        end_crop_a = crop_a_bottom
         try:
             crop_a = page.crop((0, header_top, page_width, crop_a_bottom))
             words_a = crop_a.extract_words() or []
         except Exception as e:
             logger.debug("Memzuc crop A page %s: %s", page_num, e)
             words_a = []
-        end_crop_a = crop_a_bottom
         # Crop B: (0, 0, w, min(header_top-10, h*0.30))
         crop_b_bottom_val = min(
             max(0.0, header_top - _MEMZUC_CROP_B_ABOVE_HEADER),
@@ -956,17 +982,35 @@ def _extract_memzuc_doluluk_from_page_words(
             words_b = []
 
     crop_a_results: List[Tuple[str, str, int]] = []
-    if words_a:
-        for t in _parse_memzuc_crop(words_a, _CROP_A_ROW_NAMES, period, "A"):
+    periods_found_list: List[str] = []
+    if not _MEMZUC_USE_PERCENTAGE_CROPS and header_top is not None and full_words:
+        period_positions = _find_period_positions_from_words(full_words, header_top, end_crop_a)
+        if period_positions:
+            for i, (seg_top, period) in enumerate(period_positions):
+                seg_bottom = period_positions[i + 1][0] if i + 1 < len(period_positions) else end_crop_a
+                try:
+                    seg_crop = page.crop((0, seg_top, page_width, seg_bottom))
+                    words_seg = seg_crop.extract_words() or []
+                except Exception:
+                    words_seg = []
+                if words_seg:
+                    for t in _parse_memzuc_crop(words_seg, _CROP_A_ROW_NAMES, period, "A"):
+                        crop_a_results.append(t)
+                        all_results.append(t)
+                        if period not in periods_found_list:
+                            periods_found_list.append(period)
+    if not periods_found_list and words_a:
+        for t in _parse_memzuc_crop(words_a, _CROP_A_ROW_NAMES, default_period, "A"):
             crop_a_results.append(t)
             all_results.append(t)
+        periods_found_list = [default_period]
 
-    # Crop B (üst özet): sadece Crop A'nın bulamadığı kalemler için fallback. Doluluk sütununu Crop B kelimelerinden bul (sabit band özet tabloda yanlış kalabiliyor).
+    # Crop B (üst özet): sadece Crop A'nın bulamadığı kalemler için fallback
     doluluk_band_x0_b = page_width * _CROP_B_DOLULUK_BAND_RATIO
     found_kalem = {rn for (_, rn, _) in crop_a_results}
     if words_b:
         for t in _parse_memzuc_crop(
-            words_b, _CROP_B_ROW_NAMES, period, "B", doluluk_band_x0=None
+            words_b, _CROP_B_ROW_NAMES, default_period, "B", doluluk_band_x0=None
         ):
             _, rn, _ = t
             if rn not in found_kalem:
@@ -987,13 +1031,19 @@ def _extract_memzuc_doluluk_from_page_words(
         merged[key] = max(merged.get(key, 0), doluluk)
 
     # Words/crop 4 kalem bulamadıysa tablo yedek dene (Doluluk Oranı sütunlu tablo)
-    if len(merged) < 4 and header_top is not None:
-        crop_bbox = (0, header_top, page_width, end_crop_a)
-        table_results = _memzuc_doluluk_from_tables(page, crop_bbox, period)
-        for p, row_name, doluluk in table_results:
-            key = (p, row_name)
-            if key not in merged:
-                merged[key] = doluluk
+    for p in (periods_found_list or [default_period]):
+        if len([k for k in merged if k[0] == p]) >= 4:
+            continue
+        if header_top is not None:
+            crop_bbox = (0, header_top, page_width, end_crop_a)
+            table_results = _memzuc_doluluk_from_tables(page, crop_bbox, p)
+            for _p, row_name, doluluk in table_results:
+                key = (_p, row_name)
+                if key not in merged:
+                    merged[key] = doluluk
+
+    if not periods_found_list and merged:
+        periods_found_list = sorted(set(k[0] for k in merged))
 
     lines_out = [
         f"MEMZUC_DOLULUK | dönem: {p} | kalem: {rn} | doluluk: {d}"
@@ -1001,7 +1051,7 @@ def _extract_memzuc_doluluk_from_page_words(
     ]
     debug_out = {
         "doluluk_x0": None,
-        "periods_found": [period],
+        "periods_found": periods_found_list or [default_period],
         "extracted_rows_count": len(lines_out),
         "memzuc_bbox_top": header_top,
         "memzuc_bbox_bottom": end_crop_a,
