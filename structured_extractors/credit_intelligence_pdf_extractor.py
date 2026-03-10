@@ -1238,6 +1238,10 @@ class CreditIntelligencePDFExtractor:
                             memzuc_lines_from_words.extend(
                                 _parse_memzuc_doluluk_from_text(pd.free_text or "")
                             )
+                        # Words tek dönem bulabiliyor; metinde 2024/12, 2023/12 vb. de olabilir — text fallback ile tüm dönemleri ekle, merge'de birleşir
+                        text_lines = _parse_memzuc_doluluk_from_text(pd.free_text or "")
+                        if text_lines:
+                            memzuc_lines_from_words.extend(text_lines)
         except Exception as exc:
             logger.error(f"pdfplumber failed on {path.name}: {exc}")
             warnings.append(f"pdfplumber open failed: {exc}")
