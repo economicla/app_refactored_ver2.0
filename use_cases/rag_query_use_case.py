@@ -70,6 +70,20 @@ Kontekstteki her chunk [Doküman Türü: X] etiketi taşır. Soruyu yanıtlarken
 
 Birden fazla doküman türünden chunk varsa, sorunun amacına en uygun türü tercih et ve kaynağını belirt.
 
+İSTİHBARAT RAPORU BÖLÜM REHBERİ (soru–bölüm eşleştirmesi):
+İstihbarat Raporu kontekstte yer alıyorsa, rapordaki bölümleri şöyle yorumla. Soru hangi bölümle ilgiliyse cevabını SADECE o bölümden ver; diğer bölümlerdeki veriyi karıştırma veya başka bölümden örnek verme.
+- "Özet / Genel Bilgiler": Rapor tarihi, şube, müşteri adı/no, VKN/TCKN, kuruluş, grup, sektör, segment, skorlar, erken uyarı durumu, özet bayraklar.
+- "E-Haciz Tarihçesi": Haciz/araştırma kayıtları (sicil no, ödenen/ödenmeyen adet ve tutar).
+- "Erken Uyarı Tarihçesi": Erken uyarı durumları, tarih, açıklama.
+- "Piyasa İstihbaratı": Bilgi veren firma, kişi, ünvan, tarih, görüş, açıklama (MarketInformation).
+- "Banka İstihbaratı": Diğer bankalardaki limit/risk/teminat (banka adı, firma, genel limit, nakit risk, g.nakdi risk).
+- "Memzuç Bilgileri / Doluluk Oranları": Kredi grubu memzuçları, doluluk oranları, dönem bazlı limit/risk.
+- "Konsolide Memzuç / KKB Riski": Konsolide memzuç, KKB risk bilgileri.
+- "Çek Performansı": Karşılıksız çek, protestolu senet, ihale yasaklısı.
+- "KKB Raporları": Son sorgu tarihi, firma/müşteri bilgileri.
+- "Limit Risk Bilgileri": Kaynak bazında limit/risk tablosu (Bin TL).
+Soru "piyasa" diyorsa sadece Piyasa İstihbaratı bölümünü, "memzuc" diyorsa sadece Memzuç bölümünü, "banka limit/risk" diyorsa Banka İstihbaratı veya Limit Risk bölümünü kullan.
+
 TEMEL KURALLAR:
 1. SADECE verilen kontekstteki bilgiyi kullan
 2. Kontekstte sayısal veriler, dönem bilgileri veya ilgili kalemler VARSA kesinlikle cevapla - "Bilgi mevcut değil" YAZMA
@@ -149,6 +163,21 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 r'\w+\s+bankası',
             ],
             "boost_score": 0.30,
+        },
+        # P90: Piyasa İstihbaratı (MarketInformation) → İstihbarat Raporu, deterministik cevap
+        # MEMZUC'tan önce eşleşmeli ki "piyasa istihbaratı" memzuc chunk'larına düşmesin
+        {
+            "rule_id": "PIYASA_ISTIHBARATI",
+            "rule_name": "Piyasa İstihbaratı / Market Bilgisi",
+            "priority": 90,
+            "doc_type": "İstihbarat Raporu",
+            "keywords": [
+                "piyasa istihbaratı", "piyasa istihbarat", "piyasa bilgisi", "piyasa görüşü",
+                "piyasa değerlendirmesi", "market intelligence", "bilgi veren firma",
+                "piyasadan bilgi", "piyasa bilgileri", "market information",
+            ],
+            "patterns": [],
+            "boost_score": 0.35,
         },
         # P55: Memzuç (Kredi Grubu Firma Memzuçları) → İstihbarat Raporu (K.V. risk, doluluk vb. bu tabloda)
         {
@@ -396,6 +425,43 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     "nakit_risk": nakit,
                     "gn_risk": gn,
                 })
+        return rows
+
+    def _bi_rows_from_structured_list(
+        self, structured: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Ingest sırasında metadata'ya kaydedilen banka_istihbarati listesini
+        deterministik tablo satır formatına çevirir (tüm bankaların gösterilmesi için).
+        """
+        rows: List[Dict[str, Any]] = []
+        for r in structured:
+            gl = r.get("genel_limit") or {}
+            nr = r.get("nakit_risk") or {}
+            gnr = r.get("gn_risk") or {}
+            cur = (
+                (gl.get("currency") or nr.get("currency") or gnr.get("currency") or "TRY")
+            )
+            if isinstance(cur, str):
+                cur = cur.strip().upper()
+            else:
+                cur = "TRY"
+            def _val(x: Any) -> int:
+                v = x.get("value") if isinstance(x, dict) else None
+                if v is None:
+                    return 0
+                try:
+                    return int(float(v))
+                except (TypeError, ValueError):
+                    return 0
+            rows.append({
+                "bank": (r.get("bank_name") or "").strip(),
+                "firm": (r.get("group_or_firm") or "").strip(),
+                "currency": cur,
+                "genel_limit": _val(gl),
+                "nakit_risk": _val(nr),
+                "gn_risk": _val(gnr),
+            })
         return rows
 
     def _format_bi_table_deterministic(
@@ -911,6 +977,68 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
     _BANKA_LINE_RE = re.compile(
         r'^Banka:\s*(.+?)(?:\s*\|)', re.MULTILINE
     )
+
+    # Sorudan / routing'den hangi bölümün kastedildiğini çıkar (LLM kontekstinde doğru chunk'lar öne gelsin)
+    _SECTION_KEYWORDS: List[tuple] = [
+        ("piyasa", "Piyasa İstihbaratı"),
+        ("memzuç", "Memzuç Bilgileri"),
+        ("memzuc", "Memzuç Bilgileri"),
+        ("doluluk oran", "Memzuc Doluluk"),
+        ("erken uyarı", "Erken Uyarı"),
+        ("kkb risk", "KKB Riski"),
+        ("kkb rapor", "KKB Raporları"),
+        ("özet", "Özet"),
+        ("genel bilgi", "Özet"),
+        ("e-haciz", "E-Haciz"),
+        ("haciz tarih", "E-Haciz"),
+        ("çek performans", "Çek Performansı"),
+        ("karşılıksız çek", "Çek Performansı"),
+        ("limit risk bilgi", "Limit Risk"),
+        ("kaynak bazında", "Limit Risk"),
+        ("banka istihbarat", "Banka İstihbaratı"),
+    ]
+
+    def _infer_section_from_query(
+        self, query_lower: str, routing: Optional[Dict] = None
+    ) -> Optional[str]:
+        """Soru veya routing'e göre İstihbarat Raporu bölüm adı döndürür (kontekst sıralaması için)."""
+        if routing and routing.get("matched_rule_id") == "PIYASA_ISTIHBARATI":
+            return "Piyasa İstihbaratı"
+        if routing and routing.get("matched_rule_id") == "MEMZUC":
+            return "Memzuç"
+        for kw, section in self._SECTION_KEYWORDS:
+            if kw in query_lower:
+                return section
+        return None
+
+    def _order_chunks_by_section(
+        self,
+        docs: List[Any],
+        query_lower: str,
+        routing: Optional[Dict] = None,
+    ) -> List[Any]:
+        """İstihbarat Raporu için chunk'ları soruyla ilgili bölüme göre öne alır (LLM doğru bölümü görsün)."""
+        section = self._infer_section_from_query(query_lower, routing)
+        if not section or not docs:
+            return docs
+        content_key = "content" if hasattr(docs[0], "content") else None
+        header_key = "metadata"
+        matched, rest = [], []
+        for d in docs:
+            text = ""
+            if content_key:
+                text = (getattr(d, content_key, "") or "").lower()
+            if hasattr(d, header_key) and getattr(d, header_key):
+                meta = getattr(d, header_key) or {}
+                text += " " + (meta.get("header") or "").lower()
+            if section.lower() in text or ("piyasa" in section.lower() and "bilgi veren firma" in text):
+                matched.append(d)
+            else:
+                rest.append(d)
+        reordered = matched + rest
+        if matched:
+            logger.info(f"📌 Bölüm-duyarlı sıralama: '{section}' içeren {len(matched)} chunk öne alındı")
+        return reordered
 
     def _extract_bank_index_from_chunks(self, chunks: list) -> List[str]:
         """
@@ -1753,15 +1881,24 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             )
             if use_deterministic_bi:
                 try:
-                    get_bi_lines = getattr(self.document_repository, "get_bi_lines")
                     preferred_filename = getattr(reranked_docs[0], "filename", None) if reranked_docs else None
-                    bi_chunks = await get_bi_lines(
-                        filename=preferred_filename,
-                        doc_type="İstihbarat Raporu",
+                    bi_rows = None
+                    get_structured = getattr(
+                        self.document_repository, "get_banka_istihbarati_structured", None
                     )
-                    if not bi_chunks and preferred_filename is None:
-                        bi_chunks = await get_bi_lines(filename=None, doc_type="İstihbarat Raporu")
-                    bi_rows = self._parse_bi_rows_from_contents(bi_chunks)
+                    if get_structured and preferred_filename:
+                        structured_bi = await get_structured(preferred_filename)
+                        if structured_bi:
+                            bi_rows = self._bi_rows_from_structured_list(structured_bi)
+                    if not bi_rows:
+                        get_bi_lines = getattr(self.document_repository, "get_bi_lines")
+                        bi_chunks = await get_bi_lines(
+                            filename=preferred_filename,
+                            doc_type="İstihbarat Raporu",
+                        )
+                        if not bi_chunks and preferred_filename is None:
+                            bi_chunks = await get_bi_lines(filename=None, doc_type="İstihbarat Raporu")
+                        bi_rows = self._parse_bi_rows_from_contents(bi_chunks)
                     if bi_rows:
                         table_md = self._format_bi_table_deterministic(bi_rows)
                         answer = "**Banka İstihbaratı bölümünden:**\n\n" + table_md
@@ -1793,6 +1930,52 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 except Exception as e:
                     logger.warning(f"⚠️ Deterministik BI toplama hatası, LLM yoluna düşülüyor: {e}")
                     debug_info.setdefault("bi_deterministic", {})["error"] = str(e)
+
+            # Deterministik Piyasa İstihbaratı: piyasa istihbaratı sorulduğunda sadece MarketInformation verisi dön (memzuc/LLM karışmasın)
+            is_piyasa_route = routing.get("matched_rule_id") == "PIYASA_ISTIHBARATI"
+            if is_piyasa_route and reranked_docs:
+                try:
+                    get_piyasa = getattr(
+                        self.document_repository, "get_piyasa_istihbarati_structured", None
+                    )
+                    preferred_filename = getattr(reranked_docs[0], "filename", None)
+                    if get_piyasa and preferred_filename:
+                        piyasa_data = await get_piyasa(preferred_filename)
+                        if piyasa_data and isinstance(piyasa_data, dict):
+                            lines = ["**Piyasa İstihbaratı (MarketInformation):**\n"]
+                            for key, value in piyasa_data.items():
+                                if key and value and not key.startswith("_"):
+                                    lines.append(f"- **{key}:** {value}")
+                            if len(lines) > 1:
+                                answer = "\n".join(lines)
+                                debug_info["piyasa_deterministic"] = {
+                                    "entries": len(piyasa_data),
+                                    "filename": preferred_filename,
+                                }
+                                sources_piyasa = [
+                                    SourceWithMetadata(
+                                        filename=getattr(d, "filename", ""),
+                                        chunk_index=getattr(d, "chunk_index", 0),
+                                        header=None,
+                                        similarity_score=getattr(d, "similarity_score", 0),
+                                        content_preview=(getattr(d, "content", "") or "")[:150],
+                                        chunk_size=len(getattr(d, "content", "") or ""),
+                                    )
+                                    for d in reranked_docs[:5]
+                                ]
+                                logger.info(f"📊 Deterministik Piyasa İstihbaratı: {len(piyasa_data)} kayıt (LLM atlandı)")
+                                return RAGResponse(
+                                    question=query.query,
+                                    answer=answer,
+                                    sources=sources_piyasa,
+                                    model=await self.llm_service.get_model_name(),
+                                    timestamp=datetime.utcnow(),
+                                    user_id=query.user_id,
+                                    debug_info=debug_info,
+                                )
+                except Exception as e:
+                    logger.warning(f"⚠️ Deterministik Piyasa toplama hatası, LLM yoluna düşülüyor: {e}")
+                    debug_info.setdefault("piyasa_deterministic", {})["error"] = str(e)
 
             # Deterministik Memzuc Doluluk: sorguda memzuc/doluluk geçiyorsa doluluk tablosu dön; ama kısa/orta/uzun vadeli risk veya toplam risk soruluyorsa normal RAG ile tablonun tam metninden cevaplansın
             routing_m = debug_info.get("routing_decision") or {}
@@ -1898,6 +2081,12 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     ),
                 }
                 reranked_docs = focused_docs
+
+            # Bölüm-duyarlı sıralama: soru hangi bölümü soruyorsa o bölümün chunk'ları kontekste önce gelsin (model doğru veriyi görsün)
+            routing = debug_info.get("routing_decision") or {}
+            reranked_docs = self._order_chunks_by_section(
+                reranked_docs, query.query.lower(), routing
+            )
 
             retrieval_mode = debug_info["retrieval_mode"]
 
@@ -2085,6 +2274,12 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             )
             if entity_display:
                 reranked_docs = focused_docs
+
+            # Bölüm-duyarlı sıralama (stream path)
+            routing = debug_info.get("routing_decision") or {}
+            reranked_docs = self._order_chunks_by_section(
+                reranked_docs, query.query.lower(), routing
+            )
 
             retrieval_mode = debug_info["retrieval_mode"]
 
