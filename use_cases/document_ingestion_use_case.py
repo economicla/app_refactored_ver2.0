@@ -645,43 +645,39 @@ class DocumentIngestionUseCase:
 
             logger.info("💾 Saving to database...")
 
-            documents = [
+            sections = (self._structured_json or {}).get("sections") or {}
+            bi_list = sections.get("banka_istihbarati")
+            piyasa_dict = sections.get("piyasa_istihbarati")
+            if isinstance(piyasa_dict, dict) and "source_pages" in piyasa_dict:
+                piyasa_copy = {k: v for k, v in piyasa_dict.items() if k != "source_pages"}
+                piyasa_dict = piyasa_copy if piyasa_copy else None
 
-                DocumentChunk(
-
-                    filename=filename,
-
-                    chunk_index=idx,
-
-                    content=chunk,
-
-                    embedding=embedding,
-
-                    metadata={
-
-                        "file_type": Path(filename).suffix,
-
-                        "chunk_size": len(chunk),
-
-                        "original_length": original_length,
-
-                        "header": chunk_objects[idx].get('header'),
-
-                        "source": filename,
-
-                        "chunk_position": chunk_objects[idx].get('position'),
-
-                        "doc_type": doc_type,
-
-                        "is_dictionary": is_dictionary
-
-                    }
-
+            documents = []
+            for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                meta = {
+                    "file_type": Path(filename).suffix,
+                    "chunk_size": len(chunk),
+                    "original_length": original_length,
+                    "header": chunk_objects[idx].get("header"),
+                    "source": filename,
+                    "chunk_position": chunk_objects[idx].get("position"),
+                    "doc_type": doc_type,
+                    "is_dictionary": is_dictionary,
+                }
+                if idx == 0:
+                    if bi_list is not None:
+                        meta["banka_istihbarati"] = bi_list
+                    if piyasa_dict is not None:
+                        meta["piyasa_istihbarati"] = piyasa_dict
+                documents.append(
+                    DocumentChunk(
+                        filename=filename,
+                        chunk_index=idx,
+                        content=chunk,
+                        embedding=embedding,
+                        metadata=meta,
+                    )
                 )
-
-                for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings))
-
-            ]
  
             saved_docs = await self.document_repository.save_batch(documents)
  
