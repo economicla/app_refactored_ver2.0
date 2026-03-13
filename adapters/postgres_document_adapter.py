@@ -604,6 +604,70 @@ class PostgresDocumentAdapter(IDocumentRepository):
                 logger.error(f"❌ get_bi_lines failed: {str(e)}")
                 return []
 
+    async def get_banka_istihbarati_structured(
+        self, filename: Optional[str] = None
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        İlk chunk'ın doc_metadata'sında saklanan banka_istihbarati listesini döndür.
+        Tüm banka kayıtlarının deterministik tabloda gösterilmesi için kullanılır.
+        """
+        if not filename:
+            return None
+        async with await self._get_session() as session:
+            try:
+                query = (
+                    select(DocumentModel.doc_metadata)
+                    .where(DocumentModel.filename == filename)
+                    .where(DocumentModel.deleted_at.is_(None))
+                    .order_by(DocumentModel.chunk_index)
+                    .limit(1)
+                )
+                result = await session.execute(query)
+                row = result.fetchone()
+                if not row or not row[0]:
+                    return None
+                meta = row[0] or {}
+                bi = meta.get("banka_istihbarati")
+                if isinstance(bi, list) and bi:
+                    logger.info(f"✅ get_banka_istihbarati_structured: {len(bi)} rows (filename={filename!r})")
+                    return bi
+                return None
+            except Exception as e:
+                logger.error(f"❌ get_banka_istihbarati_structured failed: {str(e)}")
+                return None
+
+    async def get_piyasa_istihbarati_structured(
+        self, filename: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        İlk chunk'ın doc_metadata'sında saklanan piyasa_istihbarati sözlüğünü döndür.
+        Piyasa istihbaratı sorularında deterministik cevap için kullanılır.
+        """
+        if not filename:
+            return None
+        async with await self._get_session() as session:
+            try:
+                query = (
+                    select(DocumentModel.doc_metadata)
+                    .where(DocumentModel.filename == filename)
+                    .where(DocumentModel.deleted_at.is_(None))
+                    .order_by(DocumentModel.chunk_index)
+                    .limit(1)
+                )
+                result = await session.execute(query)
+                row = result.fetchone()
+                if not row or not row[0]:
+                    return None
+                meta = row[0] or {}
+                piyasa = meta.get("piyasa_istihbarati")
+                if isinstance(piyasa, dict) and piyasa:
+                    logger.info(f"✅ get_piyasa_istihbarati_structured: {len(piyasa)} entries (filename={filename!r})")
+                    return piyasa
+                return None
+            except Exception as e:
+                logger.error(f"❌ get_piyasa_istihbarati_structured failed: {str(e)}")
+                return None
+
     async def get_memzuc_lines(
         self,
         filename: Optional[str] = None,
