@@ -346,9 +346,11 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             return False
         return False
 
-    # DB'den çekilen BI içeriklerinden satır parse et (deterministik tablo için)
+    # DB'den çekilen BI içeriklerinden satır parse et (deterministik tablo için).
+    # Tüm para birimlerini kabul eder (TRY, ATS, EUR, USD, BHD, CNY, XAG, AUD vb.)
+    # böylece XML/PDF'deki tüm banka kayıtları tabloya girer.
     _BI_ROW_RE = re.compile(
-        r"Banka:\s*(?P<bank>[^|]+)\s*\|\s*Firma:\s*(?P<firm>[^|]*)\s*\|\s*Genel Limit:\s*(?P<genel>[0-9,\-\s]+?)\s*TRY\s*\|\s*Nakit Risk:\s*(?P<nakit>[0-9,\-\s]+?)\s*TRY\s*\|\s*G\.Nakdi Risk:\s*(?P<gn>[0-9,\-\s]+?)\s*TRY",
+        r"Banka:\s*(?P<bank>[^|]+)\s*\|\s*Firma:\s*(?P<firm>[^|]*)\s*\|\s*Genel Limit:\s*(?P<genel>[0-9,\-\s]+?)\s*(?P<cur>[A-Z]{2,5})\s*\|\s*Nakit Risk:\s*(?P<nakit>[0-9,\-\s]+?)\s*(?:[A-Z]{2,5})\s*\|\s*G\.Nakdi Risk:\s*(?P<gn>[0-9,\-\s]+?)\s*(?:[A-Z]{2,5})",
         re.IGNORECASE,
     )
 
@@ -357,7 +359,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
     ) -> List[Dict[str, Any]]:
         """
         get_bi_lines ile alınan content listesinden BI satırlarını regex ile çıkar.
-        bank+firm uniq yapılır; genel/nakit/gn sayılar int'e çevrilir.
+        Tüm para birimleri kabul edilir; bank+firm uniq yapılır.
         """
         seen: set = set()
         rows: List[Dict] = []
@@ -369,6 +371,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 genel_s = (m.group("genel") or "").strip().replace(" ", "")
                 nakit_s = (m.group("nakit") or "").strip().replace(" ", "")
                 gn_s = (m.group("gn") or "").strip().replace(" ", "")
+                currency = (m.group("cur") or "TRY").strip().upper()
 
                 def _to_int(s: str) -> int:
                     if not s or s == "-":
@@ -388,6 +391,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 rows.append({
                     "bank": bank,
                     "firm": firm,
+                    "currency": currency,
                     "genel_limit": genel,
                     "nakit_risk": nakit,
                     "gn_risk": gn,
@@ -397,31 +401,35 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
     def _format_bi_table_deterministic(
         self, rows: List[Dict], include_totals: bool = True
     ) -> str:
-        """BI satırlarından markdown tablo + toplamlar üret."""
+        """BI satırlarından markdown tablo + toplamlar üret. Tüm para birimleri gösterilir."""
         if not rows:
             return ""
         lines = [
-            "| BANKA | FİRMA | GENEL LİMİT (TRY) | NAKİT RİSK (TRY) | G.NAKDİ RİSK (TRY) |",
-            "|-------|-------|-------------------|------------------|---------------------|",
+            "| BANKA | FİRMA | PARA BİRİMİ | GENEL LİMİT | NAKİT RİSK | G.NAKDİ RİSK |",
+            "|-------|-------|-------------|-------------|------------|---------------|",
         ]
-        total_genel = total_nakit = total_gn = 0
+        total_genel_try = total_nakit_try = total_gn_try = 0
         for r in rows:
             g = r.get("genel_limit", 0) or 0
             n = r.get("nakit_risk", 0) or 0
             gn = r.get("gn_risk", 0) or 0
-            total_genel += g
-            total_nakit += n
-            total_gn += gn
+            cur = r.get("currency") or "TRY"
+            if cur == "TRY":
+                total_genel_try += g
+                total_nakit_try += n
+                total_gn_try += gn
             lines.append(
-                f"| {r.get('bank', '')} | {r.get('firm', '')} | {g:,} | {n:,} | {gn:,} |"
+                f"| {r.get('bank', '')} | {r.get('firm', '')} | {cur} | {g:,} | {n:,} | {gn:,} |"
             )
         table = "\n".join(lines)
         if include_totals and rows:
-            table += (
-                f"\n\n**Toplam Genel Limit:** {total_genel:,} TRY  \n"
-                f"**Toplam Nakit Risk:** {total_nakit:,} TRY  \n"
-                f"**Toplam G.Nakdi Risk:** {total_gn:,} TRY"
-            )
+            if total_genel_try or total_nakit_try or total_gn_try:
+                table += (
+                    f"\n\n**Toplam (sadece TRY):** Genel Limit {total_genel_try:,} TRY  |  "
+                    f"Nakit Risk {total_nakit_try:,} TRY  |  G.Nakdi Risk {total_gn_try:,} TRY"
+                )
+            if any((r.get("currency") or "TRY").upper() != "TRY" for r in rows):
+                table += "\n\n*Tablo tüm banka istihbaratı kayıtlarını (tüm para birimleri) içerir.*"
         return table
 
     # Memzuc Doluluk Oranı: dönem bazlı parse (deterministik cevap)
@@ -456,10 +464,13 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         rest = combined[idx:]
         newline = rest.find("\n")
         if newline == -1:
-            return None
-        json_str = rest[newline + 1 :].strip()
-        # Tek satır JSON (extractor json.dumps ile tek satır yazıyor)
-        first_line = json_str.split("\n")[0].strip()
+            first_line = rest.strip()
+        else:
+            json_str = rest[newline + 1 :].strip()
+            first_line = json_str.split("\n")[0].strip()
+        # Tek satır: "[{...}]" veya "MEMZUC_STRUCTURED_JSON=[{...}]" (chunk aranabilir olsun diye)
+        if first_line.startswith("MEMZUC_STRUCTURED_JSON="):
+            first_line = first_line[len("MEMZUC_STRUCTURED_JSON=") :].strip()
         if not first_line.startswith("["):
             return None
         try:
