@@ -377,7 +377,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
 
     # DB'den çekilen BI içeriklerinden satır parse et (deterministik tablo için).
     # Tüm para birimlerini kabul eder (TRY, ATS, EUR, USD, BHD, CNY, XAG, AUD vb.)
-    # böylece XML/PDF'deki tüm banka kayıtları tabloya girer.
+    # böylece PDF'deki tüm banka kayıtları tabloya girer.
     _BI_ROW_RE = re.compile(
         r"Banka:\s*(?P<bank>[^|]+)\s*\|\s*Firma:\s*(?P<firm>[^|]*)\s*\|\s*Genel Limit:\s*(?P<genel>[0-9,\-\s]+?)\s*(?P<cur>[A-Z]{2,5})\s*\|\s*Nakit Risk:\s*(?P<nakit>[0-9,\-\s]+?)\s*(?:[A-Z]{2,5})\s*\|\s*G\.Nakdi Risk:\s*(?P<gn>[0-9,\-\s]+?)\s*(?:[A-Z]{2,5})",
         re.IGNORECASE,
