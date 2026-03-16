@@ -1,9 +1,8 @@
 """
-Structured Extractors — format-specific, schema-driven extraction.
-PDF and XML support for Kredi İstihbarat Raporu.
+Structured Extractors — Markdown-oriented PDF extraction for Kredi İstihbarat Raporu.
+Single entry: PDF → structured extraction → markdown-style text → chunking → Vector DB.
 """
 
 from .credit_intelligence_pdf_extractor import CreditIntelligencePDFExtractor
-from .credit_intelligence_xml_extractor import CreditIntelligenceXMLExtractor
 
-__all__ = ["CreditIntelligencePDFExtractor", "CreditIntelligenceXMLExtractor"]
+__all__ = ["CreditIntelligencePDFExtractor"]
