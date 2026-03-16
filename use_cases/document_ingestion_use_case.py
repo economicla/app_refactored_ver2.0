@@ -3,7 +3,8 @@
 
 DocumentIngestionUseCase - Doküman yükleme işlem hattı (Business Logic)
 
-PDF, DOCX, TXT, XLSX, PPTX desteği
+Ana akış: PDF → Markdown (structured extraction) → Intelligent Chunking → Vector DB + Reranker.
+Desteklenen formatlar: PDF (istihbarat raporu: markdown tabanlı extraction), DOCX, TXT, HTML, XLSX, PPTX.
 
 """
 
@@ -35,7 +36,7 @@ from .document_preprocessing import DocumentPreprocessor
 from .intelligent_chunking import IntelligentChunker
 from .html_structured_converter import HTMLStructuredConverter
 
-from app_refactored.structured_extractors import CreditIntelligencePDFExtractor, CreditIntelligenceXMLExtractor
+from app_refactored.structured_extractors import CreditIntelligencePDFExtractor
 from app_refactored.structured_extractors.credit_intelligence_pdf_extractor import (
     render_structured_text,
 )
@@ -99,8 +100,9 @@ class DocumentIngestionUseCase:
         path = Path(file_path)
 
         file_type = path.suffix.lower()
- 
+
         self._structured_json = None
+        self._preprocess_as_markdown = False  # True when text is already markdown (e.g. structured PDF)
 
         try:
 
@@ -119,11 +121,7 @@ class DocumentIngestionUseCase:
 
                 return self._extract_txt(file_path)
 
-            elif file_type == '.xml':
-                logger.info("📄 XML file detected → structured XML extraction")
-                return self._extract_xml_structured(file_path)
-
-            elif file_type in ('.html', '.html'):
+            elif file_type in ('.html', '.htm'):
                 return self._extract_html(file_path)
 
             elif file_type == '.xlsx':
@@ -198,37 +196,7 @@ class DocumentIngestionUseCase:
                 len(memzuc_lines),
                 [ln for ln in memzuc_lines if ln.startswith("MEMZUC_DOLULUK")],
             )
-        return text
-
-    def _extract_xml_structured(self, file_path: str) -> str:
-        """
-        Structured extraction for İstihbarat Raporu XML files.
-        Uses CreditIntelligenceXMLExtractor, then render_structured_text()
-        to produce the same controlled text as the PDF path.
-        """
-        extractor = CreditIntelligenceXMLExtractor()
-        data = extractor.extract(file_path)
-        self._structured_json = data
-
-        warnings = data.get("debug", {}).get("warnings", [])
-        if warnings:
-            for w in warnings[:10]:
-                logger.warning("⚠️ Structured XML: %s", w)
-
-        text = render_structured_text(data)
-        logger.info(
-            "✅ Structured XML extraction: %d chars, %d sections",
-            len(text),
-            sum(1 for v in data.get("sections", {}).values() if v),
-        )
-
-        memzuc_lines = (data.get("sections") or {}).get("memzuc_doluluk_fallback") or []
-        if memzuc_lines:
-            logger.info(
-                "📊 XML Memzuc doluluk satırları (%s): %s",
-                len(memzuc_lines),
-                [ln for ln in memzuc_lines if ln.startswith("MEMZUC_DOLULUK")],
-            )
+        self._preprocess_as_markdown = True  # output is already markdown-style
         return text
 
     def _extract_pdf(self, file_path: str) -> str:
@@ -485,9 +453,6 @@ class DocumentIngestionUseCase:
         """
         file_ext = Path(filename).suffix.lower()
 
-        if file_ext == '.xml':
-            return "İstihbarat Raporu"
-
         # HTML → converter'ın tespit ettiği formatı kullan
         if file_ext in ('.html', '.htm'):
             html_fmt = getattr(self, '_detected_html_format', None)
@@ -609,9 +574,10 @@ class DocumentIngestionUseCase:
             logger.info("🧹 Preprocessing text...")
             preprocessor = DocumentPreprocessor()
             raw_type = Path(filename).suffix.lstrip('.')
-            # HTML zaten HTMLStructuredConverter ile markdown'a dönüştürüldü
-            # "md" olarak işle → to_markdown() tekrar çalışmaz, sadece clean_text() çalışır
-            preprocess_type = "md" if raw_type in ("html", "htm") else raw_type
+            # HTML / structured PDF zaten markdown; "md" ile sadece clean çalışır
+            preprocess_type = "md" if (
+                raw_type in ("html", "htm") or getattr(self, "_preprocess_as_markdown", False)
+            ) else raw_type
             text = preprocessor.preprocess(
                 text,
                 file_type=preprocess_type
