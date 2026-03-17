@@ -1149,24 +1149,26 @@ def _extract_memzuc_doluluk_from_page_words(
 def _page_has_group_memzuc_signal(free_text: Optional[str]) -> bool:
     """
     Sadece grup toplam tablosu (KREDİ GRUBU FİRMA MEMZUÇLARI - ANA FİRMA DAHİL) için True.
-    Tek firma tablosu (GRUP ANA FİRMA MEMZUCU - Aktül Kağıt vb.) için False; böylece
-    'grubun doluluk oranları' sorulduğunda sadece grup verisi kullanılır.
-    Sayfada tek firma başlığı varsa o sayfa hiç işlenmez (aynı sayfada her iki tablo olsa bile).
+    Tek firma tablosu (GRUP ANA FİRMA MEMZUCU) tek başına varsa False.
+    Aynı sayfada hem tek firma hem grup tablosu varsa (S5 gibi) True döner —
+    çünkü grup tablosundaki 2025/12 verisi bu sayfada başlıyor.
     """
     if not free_text or not str(free_text).strip():
         return False
     t = str(free_text).strip()
     hay_upper = t.upper()
-    # Tek firma tablosu başlığı varsa bu sayfayı atla (Aktül Kağıt vb. sayfaları)
-    if "GRUP ANA FİRMA MEMZUCU" in hay_upper:
-        return False
-    # Grup tablosu: "MEMZUÇLARI" (çoğul) — Kredi Grubu Firma Memzuçları (tüm grup)
-    return (
+    has_grup_table = (
         "KREDİ GRUBU FİRMA MEMZUCULARI" in hay_upper
         or "KREDİ GRUBU FİRMA MEMZUÇLARI" in hay_upper
         or "MEMZUÇLARI (ANA FİRMA DAHİL)" in hay_upper
         or "MEMZUCULARI (ANA FİRMA DAHİL)" in hay_upper
     )
+    if has_grup_table:
+        return True
+    # Tek firma (GRUP ANA FİRMA MEMZUCU) başlığı varsa ama grup tablosu yoksa → atla
+    if "GRUP ANA FİRMA MEMZUCU" in hay_upper:
+        return False
+    return False
 
 
 def _page_has_memzuc_signal(free_text: Optional[str]) -> bool:
@@ -1387,28 +1389,51 @@ _GRUP_TABLE_END_MARKERS = (
 )
 
 
+# Grup tablosu başlangıç sinyalleri — segmenti bu noktadan başlat
+_GRUP_TABLE_START_MARKERS = (
+    "KREDİ GRUBU FİRMA MEMZUÇLARI",
+    "KREDİ GRUBU FİRMA MEMZUCULARI",
+    "MEMZUÇLARI (ANA FİRMA DAHİL)",
+    "MEMZUCULARI (ANA FİRMA DAHİL)",
+)
+
+
 def _extract_grup_memzuc_segment_only(page_text: str) -> str:
     """
     Sayfa metninden sadece 'Kredi Grubu Firma Memzuçları (Ana Firma Dahil)' tablosuna ait
-    kısmı döndürür. Ortası olduğu şirketler / KKB ekranı / Grup firmaları bölümleri
-    başladığı yerde keser; böylece 2025/12 için Firdevs Çizmeci tablosundaki 50/28
-    grup tablosundaki 25/3/22/20 ile karışmaz.
+    kısmı döndürür.
+    - Başlangıç: "KREDİ GRUBU FİRMA MEMZUÇLARI" başlığından itibaren (tek firma tablosu atlanır).
+    - Bitiş: "ORTAĞI OLDUĞU ŞİRKETLERİN..." veya benzeri bölüm başlığında kesilir.
+    Böylece aynı sayfada tek firma + grup + ortağı olduğu tabloları olsa bile sadece grup kısmı alınır.
     """
     if not page_text or not str(page_text).strip():
         return ""
     text = str(page_text).strip()
     if not _page_has_group_memzuc_signal(text):
         return ""
+
     def _norm_upper(s: str) -> str:
         return (s or "").upper().replace("İ", "I").replace("ı", "i")
 
     text_norm = _norm_upper(text)
+
+    # Başlangıç: grup tablosu heading'inden itibaren (tek firma kısmını atla)
+    segment_start = 0
+    for marker in _GRUP_TABLE_START_MARKERS:
+        idx = text_norm.find(_norm_upper(marker))
+        if idx != -1:
+            segment_start = idx
+            break
+
+    # Bitiş: sonraki bölüm başlığında kes
     earliest_end = len(text)
     for marker in _GRUP_TABLE_END_MARKERS:
-        idx = text_norm.find(_norm_upper(marker))
+        idx = text_norm.find(_norm_upper(marker), segment_start + 1)
         if idx != -1 and idx < earliest_end:
             earliest_end = idx
-    return text[:earliest_end].strip()
+
+    segment = text[segment_start:earliest_end].strip()
+    return segment
 
 
 def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
