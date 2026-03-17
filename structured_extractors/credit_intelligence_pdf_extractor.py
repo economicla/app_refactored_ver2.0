@@ -1436,6 +1436,148 @@ def _extract_grup_memzuc_segment_only(page_text: str) -> str:
     return segment
 
 
+_MEMZUC_RISK_ROW_NAMES = ("Toplam Nakdi Kredi", "Toplam GN Kredi", "TOPLAM", "Umumi Limit")
+
+_MEMZUC_RISK_ROW_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "Toplam Nakdi Kredi": ("toplam nakdi kredi",),
+    "Toplam GN Kredi": ("toplam gn kredi", "toplam g.nakdi kredi", "toplam gayrinakdi"),
+    "TOPLAM": ("toplam",),
+    "Umumi Limit": ("umumi limit", "umumilimit"),
+}
+
+_MEMZUC_RISK_COL_NAMES = ("Limit", "K.V. Risk", "O.V. Risk", "U.V. Risk", "Toplam Risk", "Doluluk Oranı(%)")
+
+
+def _parse_memzuc_risk_from_text(segment: str) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """
+    Kredi Grubu segment metninden dönem bazlı risk verileri çıkarır.
+    Returns: { "2025/12": { "TOPLAM": {"Limit": 123, "K.V. Risk": 456, ...}, ...}, ... }
+    """
+    if not segment or not segment.strip():
+        return {}
+
+    normalized = segment.replace("\r", "\n")
+    period_matches = list(_MEMZUC_DOLULUK_PERIOD_RE.finditer(normalized))
+    if not period_matches:
+        return {}
+
+    result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+    for i, m in enumerate(period_matches):
+        period_raw = (m.group(1) or "").strip().replace(" ", "")
+        start = m.start()
+        end = period_matches[i + 1].start() if i + 1 < len(period_matches) else len(normalized)
+        block = normalized[start:end]
+        block_lines = [ln for ln in block.splitlines() if ln.strip()]
+        if not block_lines:
+            continue
+
+        header_line = block_lines[0]
+        col_positions = _detect_column_positions(header_line)
+
+        for line in block_lines[1:]:
+            if not line.strip():
+                continue
+            row_canon = _match_risk_row_name(line)
+            if not row_canon:
+                continue
+            col_values = _extract_col_values(line, col_positions)
+            if col_values:
+                result.setdefault(period_raw, {})[row_canon] = col_values
+
+    return result
+
+
+def _detect_column_positions(header_line: str) -> List[Tuple[str, int]]:
+    """
+    Header satırından kolon adlarının başlangıç pozisyonlarını bulur.
+    Örn: "2025/12  Limit  K.V. Risk  O.V. Risk  ..." → [("Limit", 10), ("K.V. Risk", 18), ...]
+    """
+    positions: List[Tuple[str, int]] = []
+    h = header_line
+    for col_name in _MEMZUC_RISK_COL_NAMES:
+        idx = h.find(col_name)
+        if idx == -1:
+            for alt in (col_name.replace(".", ""), col_name.replace(" ", "")):
+                idx = h.find(alt)
+                if idx != -1:
+                    break
+        if idx != -1:
+            positions.append((col_name, idx))
+    positions.sort(key=lambda x: x[1])
+    return positions
+
+
+def _match_risk_row_name(line: str) -> Optional[str]:
+    """Satırın bir risk kalemi satırı olup olmadığını kontrol eder."""
+    lo = line.lower().strip()
+    for canon, aliases in _MEMZUC_RISK_ROW_ALIASES.items():
+        if canon.lower() in lo:
+            return canon
+        for a in aliases:
+            if a in lo:
+                return canon
+    return None
+
+
+def _extract_col_values(line: str, col_positions: List[Tuple[str, int]]) -> Dict[str, Any]:
+    """
+    Satırdan kolon pozisyonlarına göre sayısal değerleri çıkarır.
+    Sayılar '3.406.818.328' veya '75.518' gibi binlik noktalı formatta olabilir.
+    """
+    if not col_positions:
+        numbers = re.findall(r"[\d.]+", line)
+        values = []
+        for n in numbers:
+            cleaned = n.replace(".", "")
+            if cleaned.isdigit() and len(cleaned) >= 1:
+                values.append(int(cleaned))
+        if len(values) >= 4:
+            col_names_fallback = ["Limit", "K.V. Risk", "O.V. Risk", "U.V. Risk", "Toplam Risk"]
+            result = {}
+            for j, cn in enumerate(col_names_fallback):
+                if j < len(values):
+                    result[cn] = values[j]
+            return result
+        return {}
+
+    result: Dict[str, Any] = {}
+    for ci, (col_name, col_start) in enumerate(col_positions):
+        col_end = col_positions[ci + 1][1] if ci + 1 < len(col_positions) else len(line)
+        segment = line[col_start:col_end].strip()
+        numbers = re.findall(r"[\d.]+", segment)
+        if numbers:
+            cleaned = numbers[0].replace(".", "")
+            if cleaned.isdigit():
+                result[col_name] = int(cleaned)
+    return result
+
+
+def _collect_memzuc_risk_from_pages(pages_data: list) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """
+    Tüm sayfalardan Kredi Grubu segment metnini çıkarıp risk verilerini toplar.
+    Returns: { "2025/12": { "TOPLAM": {"Limit": 123, "K.V. Risk": 456, ...}, ...}, ... }
+    """
+    merged: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for pd in pages_data:
+        text = getattr(pd, "free_text", None) or getattr(pd, "page_text", None) or ""
+        if not text or not str(text).strip():
+            continue
+        segment = _extract_grup_memzuc_segment_only(str(text).strip())
+        if not segment:
+            continue
+        page_data = _parse_memzuc_risk_from_text(segment)
+        for period, rows in page_data.items():
+            for row_name, cols in rows.items():
+                if period not in merged:
+                    merged[period] = {}
+                if row_name not in merged[period]:
+                    merged[period][row_name] = cols
+
+
+    return merged
+
+
 def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
     """
     Tüm sayfalardan free_text alır; sadece grup tablosu (KREDİ GRUBU FİRMA MEMZUÇLARI)
@@ -1622,6 +1764,16 @@ class CreditIntelligencePDFExtractor:
                 "Memzuc structured: %s bölüm (section_types: %s)",
                 len(memzuc_structured_list),
                 [x.get("section_type") for x in memzuc_structured_list],
+            )
+
+        # Memzuc Risk (K.V., O.V., U.V., Toplam Risk, Limit): metin tabanlı, segment filtreli
+        memzuc_risk_data = _collect_memzuc_risk_from_pages(pages_data)
+        if memzuc_risk_data:
+            sections["memzuc_risk_structured"] = memzuc_risk_data
+            logger.info(
+                "Memzuc risk structured: %s dönem, kalemleri: %s",
+                len(memzuc_risk_data),
+                {p: list(rows.keys()) for p, rows in memzuc_risk_data.items()},
             )
 
         debug_payload: Dict[str, Any] = {
@@ -2566,6 +2718,22 @@ def render_structured_text(data: Dict) -> str:
         parts.append("## MEMZUC_STRUCTURED_JSON")
         # Aynı satırda etiket: chunk sınırı başlık ile JSON arasında keserse aranabilir olsun
         parts.append("MEMZUC_STRUCTURED_JSON=" + json.dumps(memzuc_structured, ensure_ascii=False))
+
+    # Memzuc Risk Structured: Kredi Grubu Firma Memzuçları – K.V. Risk, O.V. Risk, vb.
+    memzuc_risk = sections.get("memzuc_risk_structured", {})
+    if memzuc_risk and isinstance(memzuc_risk, dict):
+        parts.append("## Memzuç — Kredi Grubu Firma Memzuçları Risk Verileri")
+        parts.append("MEMZUC_RISK_STRUCTURED_JSON=" + json.dumps(memzuc_risk, ensure_ascii=False))
+        parts.append("")
+        for period in sorted(memzuc_risk.keys(), reverse=True):
+            rows = memzuc_risk[period]
+            parts.append(f"### Dönem: {period}")
+            for row_name in _MEMZUC_RISK_ROW_NAMES:
+                if row_name in rows:
+                    cols = rows[row_name]
+                    col_parts = " | ".join(f"{k}: {v}" for k, v in cols.items())
+                    parts.append(f"Kalem: {row_name} | {col_parts}")
+            parts.append("")
 
     # Konsolide Memzuç
     kons = sections.get("konsolide_memzuc", {})
