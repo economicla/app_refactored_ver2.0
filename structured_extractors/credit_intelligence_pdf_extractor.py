@@ -41,16 +41,16 @@ _SECTION_DEFS: List[_SectionDef] = [
     _SectionDef("erken_uyari_tarihcesi",     "Erken Uyarı Tarihçesi",
                 ("erken uyarı", "erken uyari")),
     _SectionDef("piyasa_istihbarati",        "Piyasa İstihbaratı",
-                ("piyasa istihbarat", "piyasa istih")),
+                ("piyasa istihbarat", "piyasa istih", "piyasa bilgisi", "piyasa bilgileri")),
     _SectionDef("banka_istihbarati",
                 "Banka İstihbaratı",
-                ("banka istihbarat", "banka istih",
+                ("banka istihbarat", "banka istih", "banka istihbarat bilgileri", "genel limit bilgileri",
                 "genel limit", "nakit risk", "nakdi risk",
                 "g.nakdi", "gayrinakdi", "teminat", "revize")),
     _SectionDef("konsolide_memzuc",          "Konsolide Memzuç",
                 ("konsolide memzuç", "konsolide memzuc")),
     _SectionDef("memzuc_bilgileri",          "Memzuç Bilgileri",
-                ("memzuç bilgi", "memzuc bilgi", "memzuç", "memzuc")),
+                ("memzuç bilgi", "memzuc bilgi", "memzuç", "memzuc", "memzuç bilgileri")),
     _SectionDef("kkb_riski",                 "KKB Riski",
                 ("kkb riski", "kkb risk")),
     _SectionDef("cek_performansi",           "Çek Performansı",
@@ -376,6 +376,60 @@ def _parse_bi_line(line: str) -> Optional[Dict]:
     }
 
 
+def _parse_bi_line_label_fallback(line: str) -> Optional[Dict]:
+    """
+    Etiket bazlı yedek: satırda "Genel Limit: X", "Nakit Risk: Y", "G.N. Risk: Z" veya
+    "X TL limit", "Y TL Nakit risk" kalıpları varsa ve banka adı bulunursa record üret.
+    Serbest metin cümlelerinde Banka Adı ↔ Limit eşleşmesini korumak için kullanılır.
+    """
+    raw = line.strip()
+    if not raw or len(raw) < 10:
+        return None
+    bank_m = _BANK_NAME_RE.search(raw)
+    if not bank_m:
+        return None
+    bank_name = _normalize_bank_name(bank_m.group(1))
+    if not bank_name or _bi_prefix_requires_alternative(bank_name):
+        return None
+    genel_v = nakit_v = gn_v = None
+    for regex in (_BI_LABEL_GENEL, _BI_LABEL_NAKIT, _BI_LABEL_GN):
+        m = regex.search(raw)
+        if m:
+            val = _parse_number(m.group(1))
+            if regex is _BI_LABEL_GENEL:
+                genel_v = val
+            elif regex is _BI_LABEL_NAKIT:
+                nakit_v = val
+            else:
+                gn_v = val
+    if genel_v is None and nakit_v is None and gn_v is None:
+        tl_limit = re.search(
+            r"(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+)\s*TL\s*limit", raw, re.IGNORECASE
+        )
+        tl_nakit = re.search(
+            r"(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+)\s*TL\s*Nakit\s*risk", raw, re.IGNORECASE
+        )
+        if tl_limit:
+            genel_v = _parse_number(tl_limit.group(1))
+        if tl_nakit:
+            nakit_v = _parse_number(tl_nakit.group(1))
+    if genel_v is None and nakit_v is None:
+        return None
+    return {
+        "bank_name": bank_name,
+        "group_or_firm": "",
+        "genel_limit": _money(int(genel_v) if genel_v is not None else 0, "TRY"),
+        "nakit_risk": _money(int(nakit_v) if nakit_v is not None else 0, "TRY"),
+        "gn_risk": _money(int(gn_v) if gn_v is not None else 0, "TRY"),
+        "d_kd": _money(None, "TRY"),
+        "istih_tarihi": "",
+        "revize_tarihi": "",
+        "status": "",
+        "teminat_sarti": "",
+        "notes": [],
+    }
+
+
 def _bi_record_key(rec: Dict) -> tuple:
     """Duplicate key: bank_name, group_or_firm, istih_tarihi, revize_tarihi (Türkiye Finans AKTÜL vs MKS ayrı kalır)."""
     return (
@@ -431,6 +485,8 @@ def _parse_banka_istihbarati_lines(text: str) -> List[Dict]:
                 i += 2
                 continue
         rec = _parse_bi_line(stripped)
+        if not rec:
+            rec = _parse_bi_line_label_fallback(stripped)
         if not rec:
             i += 1
             continue
@@ -2231,7 +2287,7 @@ def render_structured_text(data: Dict) -> str:
     Each section gets a markdown heading. Tables become key:value lines.
     Bank names are explicit. No information is invented.
     """
-    from typing import Optional
+    from typing import Any, Optional
 
     def _fmt_money(val: Optional[int | float]) -> str:
         if val is None:
@@ -2254,17 +2310,50 @@ def render_structured_text(data: Dict) -> str:
     parts.append(f"# İstihbarat Raporu — {meta.get('source_file', '?')}")
     parts.append(f"Sayfa sayısı: {meta.get('pages', '?')}\n")
 
-    # Özet / Genel Bilgiler
+    # Özet / Genel Bilgiler — key normalizasyonu (TCKN, VKN, IBAN) RAG tutarlılığı için
+    _OZET_KEY_ALIASES = [
+        ("TCKN", ("t.c. kimlik no", "tc kimlik no", "tckn", "t.c.k.no", "kimlik no")),
+        ("VKN", ("vergi kimlik no", "vkn", "vergi no", "vergi numarası", "vergi numarasi")),
+        ("VKN/TCKN", ("vkn / tckn", "vkn/tckn", "vkn - tckn")),
+        ("unvan", ("unvan", "ünvan", "firma unvan", "firma ünvanı")),
+        ("IBAN", ("iban", "İBAN", "i̇ban")),
+    ]
+
+    def _norm_ozet_key(key: str) -> str:
+        low = (key or "").strip().lower().replace("ı", "i").replace("İ", "i")
+        for canonical, aliases in _OZET_KEY_ALIASES:
+            if low == canonical.lower() or low in [a.lower() for a in aliases]:
+                return canonical
+        return key
+
+    def _ozet_value_str(val: Any) -> str:
+        if val is None:
+            return ""
+        if isinstance(val, (list, tuple)):
+            return " | ".join(str(x).strip() for x in val if x is not None and str(x).strip())
+        return str(val).strip()
+
+    def _ozet_emit_key_value(norm_k: str, val: Any) -> None:
+        s = _ozet_value_str(val)
+        if norm_k == "VKN/TCKN" and s and "/" in s:
+            parts_split = [x.strip() for x in s.split("/", 1)]
+            if len(parts_split) == 2:
+                parts.append(f"VKN: {parts_split[0].strip()}")
+                parts.append(f"TCKN: {parts_split[1].strip()}")
+                return
+        parts.append(f"{norm_k}: {s}")
+
     ozet = sections.get("ozet_genel_bilgiler", {})
     if ozet:
         parts.append("## Özet / Genel Bilgiler")
         for k, v in ozet.items():
             if k == "source_pages":
                 continue
-            parts.append(f"{k}: {v}")
+            norm_k = _norm_ozet_key(k)
+            _ozet_emit_key_value(norm_k, v)
         parts.append("")
 
-    # E-Haciz — firma bazlı okunabilir format
+    # E-Haciz — birleşik başlık (Ödendi/Ödenmedi × Adet/Tutar) RAG için açık sütun adları
     e_haciz = sections.get("e_haciz_tarihcesi", [])
     if e_haciz and isinstance(e_haciz, list):
         parts.append("## E-Haciz Tarihçesi")
@@ -2275,10 +2364,12 @@ def render_structured_text(data: Dict) -> str:
             od_tutar = entry.get("odenen_tutar", entry.get("col_4", "-"))
             odn_adet = entry.get("odenmeyen_adet", entry.get("col_5", "-"))
             odn_tutar = entry.get("odenmeyen_tutar", entry.get("col_6", "-"))
+            od_t = _fmt_money(od_tutar) if isinstance(od_tutar, (int, float)) else str(od_tutar)
+            odn_t = _fmt_money(odn_tutar) if isinstance(odn_tutar, (int, float)) else str(odn_tutar)
             parts.append(
                 f"Firma: {unvan} | Yıl: {yil} | "
-                f"Ödenen Haciz: {od_adet} adet, {_fmt_money(od_tutar) if isinstance(od_tutar, (int, float)) else od_tutar} TL | "
-                f"Ödenmeyen Haciz: {odn_adet} adet, {_fmt_money(odn_tutar) if isinstance(odn_tutar, (int, float)) else odn_tutar} TL"
+                f"Ödendi Adet: {od_adet} | Ödendi Tutar: {od_t} TL | "
+                f"Ödenmedi Adet: {odn_adet} | Ödenmedi Tutar: {odn_t} TL"
             )
         parts.append("")
 
@@ -2371,7 +2462,8 @@ def render_structured_text(data: Dict) -> str:
         memzuc_structured = _build_memzuc_structured_from_fallback(memzuc_doluluk)
     if memzuc_structured and isinstance(memzuc_structured, list):
         parts.append("## MEMZUC_STRUCTURED_JSON")
-        parts.append(json.dumps(memzuc_structured, ensure_ascii=False))
+        # Aynı satırda etiket: chunk sınırı başlık ile JSON arasında keserse aranabilir olsun
+        parts.append("MEMZUC_STRUCTURED_JSON=" + json.dumps(memzuc_structured, ensure_ascii=False))
 
     # Konsolide Memzuç
     kons = sections.get("konsolide_memzuc", {})
@@ -2406,10 +2498,12 @@ def render_structured_text(data: Dict) -> str:
             parts.append(f"{k}: {v}")
         parts.append("")
 
-    # Limit Risk Bilgileri
+    # Limit Risk Bilgileri — birim bağlamı (Bin TL) RAG için
     lr = sections.get("limit_risk_bilgileri", {})
     if lr and lr.get("table"):
         parts.append("## Limit Risk Bilgileri (Bin TL)")
+        parts.append("Tüm tutarlar Bin TL'dir.")
+        parts.append("")
         for row in lr["table"]:
             line = " | ".join(
                 f"{k}: {v}" for k, v in row.items() if k != "source_pages"
@@ -2417,10 +2511,12 @@ def render_structured_text(data: Dict) -> str:
             parts.append(line)
         parts.append("")
 
-    # Kaynak Bazında Detay
+    # Kaynak Bazında Detay — birim bağlamı (Bin TL) RAG için
     kbd = sections.get("kaynak_bazinda_detay", [])
     if kbd:
         parts.append("## Kaynak Bazında Detay (Bin TL)")
+        parts.append("Tüm tutarlar Bin TL'dir.")
+        parts.append("")
         for row in kbd:
             teminat = row.get("teminat_kirilimi", {})
             base = " | ".join(
