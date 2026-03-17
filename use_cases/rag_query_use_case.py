@@ -642,19 +642,33 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             return None
         return (m.group("period") or "").replace(" ", "").strip()
 
+    def _parse_period_for_sort(self, period: str) -> Tuple[int, int]:
+        """YYYY/MM veya YYYY/ M formatını (yıl, ay) sayıya çevirir; en güncel dönem sıralaması için."""
+        if not period:
+            return (0, 0)
+        parts = period.strip().replace(" ", "").split("/")
+        if len(parts) != 2:
+            return (0, 0)
+        try:
+            return (int(parts[0]), int(parts[1]))
+        except ValueError:
+            return (0, 0)
+
     def _select_closest_period(
         self, requested: Optional[str], periods_found: List[str]
     ) -> Tuple[Optional[str], bool]:
         """
-        İstenen dönem raporda varsa onu seç; yoksa en güncel dönemi seç (max YYYY/MM).
+        İstenen dönem raporda varsa onu seç; yoksa sayısal (yıl, ay) en güncel dönemi seç.
+        Böylece 2025/12 raporda varken 2024/12 yazılmaz; 2025/9 ile 2025/12 karışmaz.
         Returns: (selected_period, exact_match).
         """
         if not periods_found:
             return None, False
         if requested and requested in periods_found:
             return requested, True
-        # İstenen dönem yoksa en güncel dönem (2025/12 varken 2024/12 seçilmesin)
-        return max(periods_found), False
+        # En güncel dönem: (yıl, ay) sayısal max — string max 2025/9 > 2025/12 verebilir
+        en_guncel = max(periods_found, key=lambda p: self._parse_period_for_sort(p))
+        return en_guncel, False
 
     def _format_memzuc_doluluk_response(
         self,
