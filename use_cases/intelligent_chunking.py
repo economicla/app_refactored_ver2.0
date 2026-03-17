@@ -27,6 +27,11 @@ class IntelligentChunker:
 
     """
 
+    # Kayıt bazlı bölümleme: chunk ortasında tablo/satır kesilmesin
+    BANKA_RECORDS_PER_CHUNK = 10
+    E_HACIZ_RECORDS_PER_CHUNK = 8
+    LIMIT_RISK_OR_KAYNAK_LINES_PER_CHUNK = 12
+
     def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
 
         self.chunk_size = chunk_size
@@ -175,6 +180,80 @@ class IntelligentChunker:
 
         return chunks
 
+    def _chunk_banka_istihbarati_by_records(self, content: str, section_header: str) -> List[dict]:
+        """
+        Banka İstihbaratı bölümünü kayıt bazlı böl; satır ortasından kesme.
+        Her kayıt 'Banka: ...' ile başlar; '  Not:' satırları önceki kayda ait.
+        """
+        lines = content.splitlines()
+        records: List[List[str]] = []
+        current: List[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                if current:
+                    records.append(current)
+                    current = []
+                continue
+            if stripped.startswith("#"):
+                continue
+            if stripped.startswith("Banka:"):
+                if current:
+                    records.append(current)
+                current = [line]
+            elif stripped.startswith("Not:") and current:
+                current.append(line)
+            elif line.startswith("  ") and current:
+                current.append(line)
+            else:
+                if current:
+                    records.append(current)
+                    current = []
+
+        if current:
+            records.append(current)
+
+        n = self.BANKA_RECORDS_PER_CHUNK
+        out = []
+        for i in range(0, len(records), n):
+            group = records[i : i + n]
+            block = "\n".join(line for rec in group for line in rec)
+            if not block.strip():
+                continue
+            out.append({"content": "## Banka İstihbaratı\n\n" + block})
+        return out if out else [{"content": content}]
+
+    def _chunk_section_by_lines(
+        self,
+        content: str,
+        section_title: str,
+        line_prefix: str,
+        lines_per_chunk: int,
+    ) -> List[dict]:
+        """
+        Bölümü satır bazlı böl; her chunk'a başlık + isteğe bağlı prefix (örn. Bin TL) ekle.
+        Limit Risk Bilgileri ve Kaynak Bazında Detay için tablo ortasından kesilmez.
+        """
+        lines = content.splitlines()
+        data_lines: List[str] = []
+        for line in lines:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            if s.startswith("Tüm tutarlar Bin TL"):
+                continue
+            data_lines.append(line)
+        if not data_lines:
+            return [{"content": content}]
+        out = []
+        for i in range(0, len(data_lines), lines_per_chunk):
+            group = data_lines[i : i + lines_per_chunk]
+            block = "\n".join(group)
+            header_block = f"## {section_title}\n\n{line_prefix}\n\n" if line_prefix else f"## {section_title}\n\n"
+            out.append({"content": header_block + block})
+        return out if out else [{"content": content}]
+
     def chunk(self, text: str) -> List[dict]:
 
         """
@@ -193,9 +272,43 @@ class IntelligentChunker:
             header = c.get('header') or ''
             if len(content.strip()) < 50:
                 continue
-            # Banka İstihbaratı bölümünü BÖLME: tüm banka kayıtları tek chunk'ta kalsın (4+3 satır ayrı chunk'lara düşmesin)
+            # Banka İstihbaratı: kayıt bazlı böl (satır ortasından kesme; her chunk'ta N banka kaydı)
             if 'Banka İstihbaratı' in header or 'banka_istihbarati' in header.lower():
-                final_chunks.append(c)
+                sub_chunks = self._chunk_banka_istihbarati_by_records(content, header)
+                for sub in sub_chunks:
+                    sub['header'] = c['header']
+                    sub['level'] = c['level']
+                    sub['position'] = c.get('position', 0)
+                    final_chunks.append(sub)
+                continue
+            # E-Haciz Tarihçesi: satır = kayıt (Firma | Yıl | Ödendi Adet | Ödendi Tutar | Ödenmedi Adet | Ödenmedi Tutar)
+            if 'E-Haciz' in header or 'e_haciz' in header.lower():
+                sub_chunks = self._chunk_section_by_lines(
+                    content,
+                    "E-Haciz Tarihçesi",
+                    "",
+                    self.E_HACIZ_RECORDS_PER_CHUNK,
+                )
+                for sub in sub_chunks:
+                    sub['header'] = c['header']
+                    sub['level'] = c['level']
+                    sub['position'] = c.get('position', 0)
+                    final_chunks.append(sub)
+                continue
+            # Limit Risk Bilgileri / Kaynak Bazında Detay: Bin TL birimi + satır bazlı böl (tablo ortasından kesme)
+            if 'Limit Risk' in header or 'Kaynak Bazında' in header or 'limit_risk' in header.lower() or 'kaynak_bazinda' in header.lower():
+                section_title = "Limit Risk Bilgileri (Bin TL)" if 'Limit Risk' in header or 'limit_risk' in header.lower() else "Kaynak Bazında Detay (Bin TL)"
+                sub_chunks = self._chunk_section_by_lines(
+                    content,
+                    section_title,
+                    "Tüm tutarlar Bin TL'dir.",
+                    self.LIMIT_RISK_OR_KAYNAK_LINES_PER_CHUNK,
+                )
+                for sub in sub_chunks:
+                    sub['header'] = c['header']
+                    sub['level'] = c['level']
+                    sub['position'] = c.get('position', 0)
+                    final_chunks.append(sub)
                 continue
             if len(content) > self.chunk_size * 1.2:
                 sub_chunks = self._chunk_by_paragraphs(content, header=c['header'])
