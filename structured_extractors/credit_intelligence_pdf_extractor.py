@@ -1345,28 +1345,34 @@ def _extract_all_memzuc_sections_from_pages(pages: List["_PageData"]) -> List[Di
     return sections_out
 
 
-def _parse_memzuc_doluluk_from_text(text: str) -> List[str]:
+def _parse_memzuc_doluluk_from_text(
+    text: str,
+    default_period: Optional[str] = None,
+) -> List[str]:
     """
     Metinde dönem (20xx/yy) bloklarını bulur; her blokta her kalem için **son** eşleşen satırdaki
     son 1-2 haneli sayıyı doluluk oranı olarak alır (özet tablosu yerine ana tablo satırı seçilir).
+
+    default_period: devam sayfalarında, ilk dönem header'ından ÖNCEKİ satırlara
+    atanacak dönem (önceki sayfanın son dönemi). TOPLAM / Umumi Limit gibi satırlar buna gider.
+
     Returns: ["MEMZUC_DOLULUK | dönem: 2025/12 | kalem: Umumi Limit | doluluk: 20", ...]
     """
     lines_out: List[str] = []
     normalized = text.replace("\r", "\n")
     period_matches = list(_MEMZUC_DOLULUK_PERIOD_RE.finditer(normalized))
-    for i, m in enumerate(period_matches):
-        period_raw = (m.group(1) or "").strip()
-        period_norm = period_raw.replace(" ", "")
-        start = m.end()
-        end = period_matches[i + 1].start() if i + 1 < len(period_matches) else len(normalized)
-        block = normalized[start:end]
-        block_lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
-        # Her kalem için bloktaki son eşleşen satırı al (özet satırı değil, ana tablo satırı)
+
+    def _extract_from_block(block_text: str, period_norm: str) -> None:
+        block_lines = [ln.strip() for ln in block_text.splitlines() if ln.strip()]
         for row_name in _MEMZUC_DOLULUK_ROW_NAMES:
             row_lower = row_name.lower()
             last_match_line: Optional[str] = None
             for line in block_lines:
-                if row_lower in line.lower():
+                lo = line.lower()
+                if row_name == "TOPLAM":
+                    if re.search(r"\btoplam\b", lo) and "nakdi" not in lo and "gn" not in lo and "risk" not in lo:
+                        last_match_line = line
+                elif row_lower in lo:
                     last_match_line = line
             if last_match_line:
                 nums = re.findall(r"\b\d{1,2}\b", last_match_line)
@@ -1375,6 +1381,23 @@ def _parse_memzuc_doluluk_from_text(text: str) -> List[str]:
                     lines_out.append(
                         f"MEMZUC_DOLULUK | dönem: {period_norm} | kalem: {row_name} | doluluk: {pct}"
                     )
+
+    # İlk period match'ten ÖNCEKİ satırlar → default_period'a ata (continuation page)
+    if default_period and period_matches:
+        pre_block = normalized[: period_matches[0].start()]
+        if pre_block.strip():
+            _extract_from_block(pre_block, default_period)
+    elif default_period and not period_matches:
+        _extract_from_block(normalized, default_period)
+
+    for i, m in enumerate(period_matches):
+        period_raw = (m.group(1) or "").strip()
+        period_norm = period_raw.replace(" ", "")
+        start = m.end()
+        end = period_matches[i + 1].start() if i + 1 < len(period_matches) else len(normalized)
+        block = normalized[start:end]
+        _extract_from_block(block, period_norm)
+
     return lines_out
 
 
@@ -1458,10 +1481,18 @@ _RISK_COL_ORDER = (
 )
 
 
-def _parse_memzuc_risk_from_text(segment: str) -> Dict[str, Dict[str, Dict[str, Any]]]:
+def _parse_memzuc_risk_from_text(
+    segment: str,
+    default_period: Optional[str] = None,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
     Kredi Grubu segment metninden dönem bazlı risk verileri çıkarır.
     Sayılar sıralı olarak parse edilir (kolon pozisyonuna bağlı değil).
+
+    default_period: devam sayfalarında, ilk dönem header'ından ÖNCEKİ satırlara
+    atanacak dönem (önceki sayfanın son dönemi, örn. "2025/12").
+    Bu sayede TOPLAM / Umumi Limit gibi sayfa başında kalan satırlar doğru döneme gider.
+
     Returns: { "2025/12": { "TOPLAM": {"Limit": 123, "K.V. Risk": 456, ...}, ...}, ... }
     """
     if not segment or not segment.strip():
@@ -1469,18 +1500,14 @@ def _parse_memzuc_risk_from_text(segment: str) -> Dict[str, Dict[str, Dict[str, 
 
     normalized = segment.replace("\r", "\n")
     period_matches = list(_MEMZUC_DOLULUK_PERIOD_RE.finditer(normalized))
-    if not period_matches:
+
+    if not period_matches and not default_period:
         return {}
 
     result: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
-    for i, m in enumerate(period_matches):
-        period_raw = (m.group(1) or "").strip().replace(" ", "")
-        start = m.start()
-        end = period_matches[i + 1].start() if i + 1 < len(period_matches) else len(normalized)
-        block = normalized[start:end]
-
-        for line in block.splitlines():
+    def _process_block(block_text: str, period: str) -> None:
+        for line in block_text.splitlines():
             if not line.strip():
                 continue
             row_canon = _match_risk_row_name(line)
@@ -1488,20 +1515,42 @@ def _parse_memzuc_risk_from_text(segment: str) -> Dict[str, Dict[str, Dict[str, 
                 continue
             col_values = _extract_col_values_sequential(line)
             if col_values:
-                result.setdefault(period_raw, {})[row_canon] = col_values
+                result.setdefault(period, {})[row_canon] = col_values
+
+    # İlk period match'ten ÖNCEKİ satırlar → default_period'a ata (continuation page)
+    if default_period:
+        pre_start = period_matches[0].start() if period_matches else len(normalized)
+        pre_block = normalized[:pre_start]
+        if pre_block.strip():
+            _process_block(pre_block, default_period)
+
+    for i, m in enumerate(period_matches):
+        period_raw = (m.group(1) or "").strip().replace(" ", "")
+        start = m.start()
+        end = period_matches[i + 1].start() if i + 1 < len(period_matches) else len(normalized)
+        block = normalized[start:end]
+        _process_block(block, period_raw)
 
     return result
 
 
 def _match_risk_row_name(line: str) -> Optional[str]:
-    """Satırın bir risk kalemi satırı olup olmadığını kontrol eder."""
+    """
+    Satırın bir risk kalemi satırı olup olmadığını kontrol eder.
+    Eşleşme sırası önemli: spesifik isimler önce (Toplam Nakdi > Toplam GN > TOPLAM).
+    "TOPLAM" sadece satır başı "toplam" + ardından nakdi/gn/risk gelmiyorsa eşleşir.
+    """
     lo = line.lower().strip()
-    for canon, aliases in _MEMZUC_RISK_ROW_ALIASES.items():
-        if canon.lower() in lo:
-            return canon
-        for a in aliases:
-            if a in lo:
-                return canon
+    if "toplam nakdi kredi" in lo:
+        return "Toplam Nakdi Kredi"
+    if "toplam gn kredi" in lo or "toplam g.nakdi kredi" in lo or "toplam gayrinakdi" in lo:
+        return "Toplam GN Kredi"
+    if "umumi limit" in lo or "umumilimit" in lo:
+        return "Umumi Limit"
+    # TOPLAM: satır "toplam" ile başlar ama "nakdi", "gn", "risk" takip etmez
+    m = re.match(r"^\s*toplam\b", lo)
+    if m and not re.match(r"^\s*toplam\s+(nakdi|gn|g\.|gayri|risk)", lo):
+        return "TOPLAM"
     return None
 
 
@@ -1569,10 +1618,15 @@ def _collect_memzuc_risk_from_pages(pages_data: list) -> Dict[str, Dict[str, Dic
     """
     Tüm sayfalardan Kredi Grubu segment metnini çıkarıp risk verilerini toplar.
     Devam sayfalarını da işler (sayfa 6 gibi: başlık yok ama TOPLAM/Umumi Limit var).
+
+    last_period takibi: önceki sayfanın son dönemini bilir ve devam sayfasında
+    period header'ı olmayan satırları (TOPLAM, Umumi Limit) o döneme atar.
+
     Returns: { "2025/12": { "TOPLAM": {"Limit": 123, "K.V. Risk": 456, ...}, ...}, ... }
     """
     merged: Dict[str, Dict[str, Dict[str, Any]]] = {}
     prev_had_grup = False
+    last_period: Optional[str] = None
 
     for pd in pages_data:
         text = getattr(pd, "free_text", None) or getattr(pd, "page_text", None) or ""
@@ -1583,11 +1637,14 @@ def _collect_memzuc_risk_from_pages(pages_data: list) -> Dict[str, Dict[str, Dic
         text_clean = str(text).strip()
         segment = _extract_grup_memzuc_segment_only(text_clean)
 
+        is_continuation = False
         if segment:
             prev_had_grup = True
         elif prev_had_grup:
             segment = _extract_grup_continuation_segment(text_clean)
-            if not segment:
+            if segment:
+                is_continuation = True
+            else:
                 prev_had_grup = False
         else:
             continue
@@ -1595,13 +1652,25 @@ def _collect_memzuc_risk_from_pages(pages_data: list) -> Dict[str, Dict[str, Dic
         if not segment:
             continue
 
-        page_data = _parse_memzuc_risk_from_text(segment)
+        page_data = _parse_memzuc_risk_from_text(
+            segment,
+            default_period=last_period if is_continuation else None,
+        )
+
         for period, rows in page_data.items():
             for row_name, cols in rows.items():
                 if period not in merged:
                     merged[period] = {}
                 if row_name not in merged[period]:
                     merged[period][row_name] = cols
+
+        if page_data:
+            all_periods = sorted(
+                page_data.keys(),
+                key=lambda p: tuple(int(x) for x in p.split("/") if x.isdigit()),
+                reverse=True,
+            )
+            last_period = all_periods[0]
 
     return merged
 
@@ -1611,9 +1680,14 @@ def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
     Tüm sayfalardan free_text alır; sadece grup tablosu (KREDİ GRUBU FİRMA MEMZUÇLARI)
     sayfalarında _parse_memzuc_doluluk_from_text çalıştırıp satırları toplar.
     Devam sayfalarını da işler (sayfa 6 gibi: başlık yok ama TOPLAM/Umumi Limit var).
+
+    last_period takibi: devam sayfasında period header'ı olmayan satırları
+    (TOPLAM, Umumi Limit) önceki sayfanın son dönemine atar.
     """
     all_lines: List[str] = []
     prev_had_grup = False
+    last_period: Optional[str] = None
+
     for pd in pages:
         text = (
             getattr(pd, "free_text", None)
@@ -1627,11 +1701,14 @@ def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
         text_clean = str(text).strip()
         segment = _extract_grup_memzuc_segment_only(text_clean)
 
+        is_continuation = False
         if segment:
             prev_had_grup = True
         elif prev_had_grup:
             segment = _extract_grup_continuation_segment(text_clean)
-            if not segment:
+            if segment:
+                is_continuation = True
+            else:
                 prev_had_grup = False
         else:
             continue
@@ -1639,8 +1716,23 @@ def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
         if not segment:
             continue
 
-        page_lines = _parse_memzuc_doluluk_from_text(segment)
+        page_lines = _parse_memzuc_doluluk_from_text(
+            segment,
+            default_period=last_period if is_continuation else None,
+        )
         all_lines.extend(page_lines)
+
+        period_hits = [
+            (pm.group(1) or "").strip().replace(" ", "")
+            for pm in _MEMZUC_DOLULUK_PERIOD_RE.finditer(segment)
+        ]
+        if period_hits:
+            last_period = sorted(
+                period_hits,
+                key=lambda p: tuple(int(x) for x in p.split("/") if x.isdigit()),
+                reverse=True,
+            )[0]
+
     return all_lines
 
 
