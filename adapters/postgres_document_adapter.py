@@ -687,7 +687,9 @@ class PostgresDocumentAdapter(IDocumentRepository):
                     " content ILIKE '%MEMZUC_DOLULUK%'"
                     " OR content ILIKE '%MEMZUC_STRUCTURED_JSON%'"
                     " OR content ILIKE '%KREDİ GRUBU FİRMA MEMZUCULARI%'"
+                    " OR content ILIKE '%Kredi Grubu Firma Memzuçları%'"
                     " OR content ILIKE '%MEMZUC BİLGİLERİ%'"
+                    " OR content ILIKE '%Memzuç — Kredi Grubu%'"
                     " OR content ILIKE '%Doluluk Oranı%'"
                     ") AND content ~ '20[0-9]{2}[[:space:]]*/[[:space:]]*[0-9]{2}'"
                 )
