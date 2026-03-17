@@ -2161,13 +2161,16 @@ class CreditIntelligencePDFExtractor:
         Detect sub-headers inside the tables and split accordingly.
         Dönem satırları (2025/12, 2024/12 vb.) algılanır ve her entry'e "donem" eklenir.
         """
-        sub_keys = {
-            "grup_ana_firma_memzucu": ("grup", "ana firma"),
-            "kredi_grubu_firma_memzuclari": ("kredi grubu",),
-            "ortagi_oldugu_sirketlerin_memzuclari": ("ortağı olduğu", "ortagi oldugu"),
-            "kkb_ekrani_iliskili_firma_memzuclari": ("kkb ekranı", "kkb ekrani", "ilişkili"),
-        }
-        result: Dict[str, List] = {k: [] for k in sub_keys}
+        # Sıralama kritik: "kredi grubu" en önce kontrol edilmeli; "grup" tek başına
+        # "kredi grubu" içindeki "grubu" ile de eşleşir, bu yüzden daha spesifik pattern önce.
+        _sub_match_order = [
+            ("kredi_grubu_firma_memzuclari", ("kredi grubu firma", "kredi grubu")),
+            ("ortagi_oldugu_sirketlerin_memzuclari", ("ortağı olduğu", "ortagi oldugu")),
+            ("kkb_ekrani_iliskili_firma_memzuclari", ("kkb ekranı", "kkb ekrani", "ilişkili firma")),
+            ("grup_ana_firma_memzucu", ("grup ana firma", "ana firma memzucu", "ana firma memzuçu")),
+        ]
+        _sub_key_names = [sk for sk, _ in _sub_match_order]
+        result: Dict[str, List] = {k: [] for k in _sub_key_names}
         current_sub: Optional[str] = None
         current_period: Optional[str] = None
 
@@ -2181,7 +2184,7 @@ class CreditIntelligencePDFExtractor:
                     combined_lower = combined.lower()
 
                     matched_sub = None
-                    for sk, patterns in sub_keys.items():
+                    for sk, patterns in _sub_match_order:
                         if any(p in combined_lower for p in patterns):
                             matched_sub = sk
                             break
