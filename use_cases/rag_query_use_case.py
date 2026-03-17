@@ -2246,16 +2246,20 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                             debug_info["memzuc_periods_found"] = periods_found
                             debug_info["memzuc_requested_period"] = requested_period
                             debug_info["memzuc_selected_period"] = selected_period
+                            _src_header = (
+                                f"Memzuç Bilgileri – Kredi Grubu Firma Memzuçları "
+                                f"({selected_period})"
+                            )
                             sources_memzuc = [
                                 SourceWithMetadata(
                                     filename=getattr(d, "filename", ""),
                                     chunk_index=getattr(d, "chunk_index", 0),
-                                    header=None,
+                                    header=_src_header,
                                     similarity_score=getattr(d, "similarity_score", 0),
                                     content_preview=(getattr(d, "content", "") or "")[:150],
                                     chunk_size=len(getattr(d, "content", "") or ""),
                                 )
-                                for d in reranked_docs[:5]
+                                for d in reranked_docs[:1]
                             ]
                             logger.info(
                                 f"📊 Deterministik Memzuc risk: column={asked_column}, "
@@ -2294,16 +2298,20 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                             debug_info["memzuc_requested_period"] = requested_period
                             debug_info["memzuc_selected_period"] = selected_period
                             debug_info["memzuc_row_count"] = row_count
+                            _src_header_d = (
+                                f"Memzuç Bilgileri – Kredi Grubu Firma Memzuçları "
+                                f"– Doluluk Oranları ({selected_period})"
+                            )
                             sources_memzuc = [
                                 SourceWithMetadata(
                                     filename=getattr(d, "filename", ""),
                                     chunk_index=getattr(d, "chunk_index", 0),
-                                    header=None,
+                                    header=_src_header_d,
                                     similarity_score=getattr(d, "similarity_score", 0),
                                     content_preview=(getattr(d, "content", "") or "")[:150],
                                     chunk_size=len(getattr(d, "content", "") or ""),
                                 )
-                                for d in reranked_docs[:5]
+                                for d in reranked_docs[:1]
                             ]
                             logger.info(
                                 f"📊 Deterministik Memzuc doluluk: selected_period={selected_period}, "
