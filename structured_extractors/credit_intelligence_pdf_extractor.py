@@ -715,9 +715,9 @@ def _find_period_positions_from_words(
 
 def _merge_memzuc_lines_across_pages(lines: List[str]) -> List[str]:
     """
-    Birden fazla sayfadan gelen MEMZUC_DOLULUK satırlarını (dönem, kalem) bazında birleştirir;
-    aynı (dönem, kalem) için doluluk = max(doluluk). Böylece chunk'lara dağılan 2/7/0/28/39
-    yerine tek satırda 20/22 döner.
+    Birden fazla sayfadan gelen MEMZUC_DOLULUK satırlarını (dönem, kalem) bazında birleştirir.
+    Aynı (dönem, kalem) için ilk gelen değer korunur (first-wins); böylece farklı tablolardan
+    gelen karışık değerler (örn. Ortası olduğu tablosundaki 50) grup tablosundaki 3'ü ezmez.
     """
     merged: Dict[Tuple[str, str], int] = {}
     for line in lines:
@@ -734,7 +734,8 @@ def _merge_memzuc_lines_across_pages(lines: List[str]) -> List[str]:
         if not period or not kalem:
             continue
         key = (period, kalem)
-        merged[key] = max(merged.get(key, 0), doluluk)
+        if key not in merged:
+            merged[key] = doluluk
     return [
         f"MEMZUC_DOLULUK | dönem: {p} | kalem: {rn} | doluluk: {d}"
         for (p, rn), d in merged.items()
@@ -1375,11 +1376,46 @@ def _parse_memzuc_doluluk_from_text(text: str) -> List[str]:
     return lines_out
 
 
+# Grup tablosu bittikten sonra gelen bölüm başlıkları — bu noktadan sonraki metin başka tabloya aittir
+_GRUP_TABLE_END_MARKERS = (
+    "ORTAĞI OLDUĞU ŞİRKETLERİN MEMZUÇLARI",
+    "ORTAĞI OLDUĞU ŞİRKETLERİN MEMZUCULARI",
+    "KKB EKRANI İLİŞKİLİ FİRMA MEMZUÇLARI",
+    "KKB EKRANI İLİŞKİLİ FİRMA MEMZUCULARI",
+    "GRUP FİRMALARI VE İLİŞKİLİ",
+    "GRUP FİRMALARI VE İLİŞKİ/YAKINLIK",
+)
+
+
+def _extract_grup_memzuc_segment_only(page_text: str) -> str:
+    """
+    Sayfa metninden sadece 'Kredi Grubu Firma Memzuçları (Ana Firma Dahil)' tablosuna ait
+    kısmı döndürür. Ortası olduğu şirketler / KKB ekranı / Grup firmaları bölümleri
+    başladığı yerde keser; böylece 2025/12 için Firdevs Çizmeci tablosundaki 50/28
+    grup tablosundaki 25/3/22/20 ile karışmaz.
+    """
+    if not page_text or not str(page_text).strip():
+        return ""
+    text = str(page_text).strip()
+    if not _page_has_group_memzuc_signal(text):
+        return ""
+    def _norm_upper(s: str) -> str:
+        return (s or "").upper().replace("İ", "I").replace("ı", "i")
+
+    text_norm = _norm_upper(text)
+    earliest_end = len(text)
+    for marker in _GRUP_TABLE_END_MARKERS:
+        idx = text_norm.find(_norm_upper(marker))
+        if idx != -1 and idx < earliest_end:
+            earliest_end = idx
+    return text[:earliest_end].strip()
+
+
 def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
     """
     Tüm sayfalardan free_text alır; sadece grup tablosu (KREDİ GRUBU FİRMA MEMZUÇLARI)
     sayfalarında _parse_memzuc_doluluk_from_text çalıştırıp satırları toplar.
-    Tek firma (Aktül Kağıt vb.) sayfaları atlanır — grubun doluluk sorusu grup verisiyle cevaplansın.
+    Her sayfada sadece grup tablosuna ait segment parse edilir (Ortası olduğu / KKB vb. kesilir).
     """
     all_lines: List[str] = []
     for pd in pages:
@@ -1390,9 +1426,10 @@ def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
         )
         if not (text and str(text).strip()):
             continue
-        if not _page_has_group_memzuc_signal(text):
+        segment = _extract_grup_memzuc_segment_only(str(text).strip())
+        if not segment:
             continue
-        page_lines = _parse_memzuc_doluluk_from_text(str(text).strip())
+        page_lines = _parse_memzuc_doluluk_from_text(segment)
         all_lines.extend(page_lines)
     return all_lines
 
@@ -1495,13 +1532,17 @@ class CreditIntelligencePDFExtractor:
                                 len(word_lines),
                             )
                         else:
-                            memzuc_lines_from_words.extend(
-                                _parse_memzuc_doluluk_from_text(pd.free_text or "")
-                            )
-                        # Words tek dönem bulabiliyor; metinde 2024/12, 2023/12 vb. de olabilir — text fallback ile tüm dönemleri ekle, merge'de birleşir
-                        text_lines = _parse_memzuc_doluluk_from_text(pd.free_text or "")
-                        if text_lines:
-                            memzuc_lines_from_words.extend(text_lines)
+                            segment = _extract_grup_memzuc_segment_only(pd.free_text or "")
+                            if segment:
+                                memzuc_lines_from_words.extend(
+                                    _parse_memzuc_doluluk_from_text(segment)
+                                )
+                        # Words tek dönem bulabiliyor; metinde 2024/12, 2023/12 vb. de olabilir — text fallback ile tüm dönemleri ekle (sadece grup segmenti)
+                        segment = _extract_grup_memzuc_segment_only(pd.free_text or "")
+                        if segment:
+                            text_lines = _parse_memzuc_doluluk_from_text(segment)
+                            if text_lines:
+                                memzuc_lines_from_words.extend(text_lines)
         except Exception as exc:
             logger.error(f"pdfplumber failed on {path.name}: {exc}")
             warnings.append(f"pdfplumber open failed: {exc}")
