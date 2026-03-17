@@ -2151,12 +2151,15 @@ class CreditIntelligencePDFExtractor:
                 return len(search_tokens) > 0 and matched >= len(search_tokens) * 0.6
         return False
 
+    _MEMZUC_PERIOD_RE = re.compile(r"^(20\d{2}\s*/\s*\d{1,2})$")
+
     def _build_memzuc(
         self, pages: List["_PageData"], warnings: List[str]
     ) -> Dict:
         """
         Memzuç has sub-sections: grup/ana firma, kredi grubu, ortağı olduğu, KKB ilişkili.
         Detect sub-headers inside the tables and split accordingly.
+        Dönem satırları (2025/12, 2024/12 vb.) algılanır ve her entry'e "donem" eklenir.
         """
         sub_keys = {
             "grup_ana_firma_memzucu": ("grup", "ana firma"),
@@ -2166,6 +2169,7 @@ class CreditIntelligencePDFExtractor:
         }
         result: Dict[str, List] = {k: [] for k in sub_keys}
         current_sub: Optional[str] = None
+        current_period: Optional[str] = None
 
         for pd in pages:
             for tbl in pd.tables:
@@ -2173,11 +2177,12 @@ class CreditIntelligencePDFExtractor:
                 effective_headers: Optional[List[str]] = None
 
                 for row in tbl:
-                    combined = ' '.join(row).lower()
+                    combined = ' '.join(c or '' for c in row).strip()
+                    combined_lower = combined.lower()
 
                     matched_sub = None
                     for sk, patterns in sub_keys.items():
-                        if any(p in combined for p in patterns):
+                        if any(p in combined_lower for p in patterns):
                             matched_sub = sk
                             break
 
@@ -2185,10 +2190,24 @@ class CreditIntelligencePDFExtractor:
                         current_sub = matched_sub
                         headers_detected = False
                         effective_headers = None
+                        current_period = None
                         continue
 
                     if not current_sub:
                         current_sub = "grup_ana_firma_memzucu"
+
+                    # Dönem satırı: ilk hücrede "2025/12" gibi, diğerleri "Limit", "K.V. Risk" vb. header
+                    first_cell = (row[0] or "").strip() if row else ""
+                    period_m = self._MEMZUC_PERIOD_RE.match(first_cell.replace(" ", ""))
+                    if period_m:
+                        current_period = first_cell.replace(" ", "")
+                        non_empty_rest = [c for c in row[1:] if (c or "").strip()]
+                        if non_empty_rest:
+                            effective_headers = ["Kalem"]
+                            for i, c in enumerate(row[1:], 1):
+                                effective_headers.append(c.strip() if c else f"col_{i}")
+                            headers_detected = True
+                        continue
 
                     if not headers_detected:
                         non_numeric = sum(
@@ -2213,6 +2232,8 @@ class CreditIntelligencePDFExtractor:
                             num = _parse_number(c)
                             entry[f"col_{i}"] = num if num is not None else c
 
+                    if current_period:
+                        entry["donem"] = current_period
                     entry["source_page"] = pd.page_num
                     result[current_sub].append(entry)
 
@@ -2498,20 +2519,32 @@ def render_structured_text(data: Dict) -> str:
                     parts.append(f"  Not: {note}")
         parts.append("")
 
-    # Memzuç
+    # Memzuç — her alt bölüm ayrı heading, dönem etiketli
+    _MEMZUC_SUB_DISPLAY = {
+        "grup_ana_firma_memzucu": "Grup Ana Firma Memzucu",
+        "kredi_grubu_firma_memzuclari": "Kredi Grubu Firma Memzuçları (Ana Firma Dahil)",
+        "ortagi_oldugu_sirketlerin_memzuclari": "Ortağı Olduğu Şirketlerin Memzuçları",
+        "kkb_ekrani_iliskili_firma_memzuclari": "KKB Ekranı İlişkili Firma Memzuçları",
+    }
     memzuc = sections.get("memzuc_bilgileri", {})
     if memzuc and isinstance(memzuc, dict):
-        parts.append("## Memzuç Bilgileri")
         for sub_key, sub_list in memzuc.items():
             if not isinstance(sub_list, list) or not sub_list:
                 continue
-            parts.append(f"### {sub_key}")
+            display_name = _MEMZUC_SUB_DISPLAY.get(sub_key, sub_key)
+            parts.append(f"## Memzuç — {display_name}")
+            last_donem = None
             for entry in sub_list:
+                donem = entry.get("donem", "")
+                if donem and donem != last_donem:
+                    parts.append(f"### Dönem: {donem}")
+                    last_donem = donem
                 line = " | ".join(
-                    f"{k}: {v}" for k, v in entry.items() if k != "source_page"
+                    f"{k}: {v}" for k, v in entry.items()
+                    if k not in ("source_page", "donem")
                 )
                 parts.append(line)
-        parts.append("")
+            parts.append("")
 
     # Memzuc Doluluk Oranları (text fallback — DB'de MEMZUC_DOLULUK araması için)
     memzuc_doluluk = sections.get("memzuc_doluluk_fallback", [])
