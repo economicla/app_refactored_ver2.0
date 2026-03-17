@@ -1529,19 +1529,72 @@ def _extract_col_values_sequential(line: str) -> Dict[str, Any]:
     return result
 
 
+def _extract_grup_continuation_segment(page_text: str) -> str:
+    """
+    Devam sayfası: KREDİ GRUBU başlığı yok ama sayfa başında tablonun devamı var.
+    Sayfa başından ilk bitiş marker'ına (ORTAĞI OLDUĞU, KKB EKRANI vb.) kadar olan
+    kısmı döndürür. Böylece TOPLAM / Umumi Limit gibi devam satırları yakalanır.
+    """
+    if not page_text or not str(page_text).strip():
+        return ""
+    text = str(page_text).strip()
+
+    def _norm_upper(s: str) -> str:
+        return (s or "").upper().replace("İ", "I").replace("ı", "i")
+
+    text_norm = _norm_upper(text)
+
+    earliest_end = len(text)
+    for marker in _GRUP_TABLE_END_MARKERS:
+        idx = text_norm.find(_norm_upper(marker))
+        if idx != -1 and idx < earliest_end:
+            earliest_end = idx
+
+    segment = text[:earliest_end].strip()
+    if not segment:
+        return ""
+
+    # Gerçekten memzuç devamı mı kontrol et: dönem veya risk satırı adı olmalı
+    has_period = bool(_MEMZUC_DOLULUK_PERIOD_RE.search(segment))
+    has_risk_row = any(
+        canon.lower() in segment.lower()
+        for canon in _MEMZUC_RISK_ROW_NAMES
+    )
+    if has_period or has_risk_row:
+        return segment
+    return ""
+
+
 def _collect_memzuc_risk_from_pages(pages_data: list) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
     Tüm sayfalardan Kredi Grubu segment metnini çıkarıp risk verilerini toplar.
+    Devam sayfalarını da işler (sayfa 6 gibi: başlık yok ama TOPLAM/Umumi Limit var).
     Returns: { "2025/12": { "TOPLAM": {"Limit": 123, "K.V. Risk": 456, ...}, ...}, ... }
     """
     merged: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    prev_had_grup = False
+
     for pd in pages_data:
         text = getattr(pd, "free_text", None) or getattr(pd, "page_text", None) or ""
         if not text or not str(text).strip():
+            prev_had_grup = False
             continue
-        segment = _extract_grup_memzuc_segment_only(str(text).strip())
+
+        text_clean = str(text).strip()
+        segment = _extract_grup_memzuc_segment_only(text_clean)
+
+        if segment:
+            prev_had_grup = True
+        elif prev_had_grup:
+            segment = _extract_grup_continuation_segment(text_clean)
+            if not segment:
+                prev_had_grup = False
+        else:
+            continue
+
         if not segment:
             continue
+
         page_data = _parse_memzuc_risk_from_text(segment)
         for period, rows in page_data.items():
             for row_name, cols in rows.items():
@@ -1550,7 +1603,6 @@ def _collect_memzuc_risk_from_pages(pages_data: list) -> Dict[str, Dict[str, Dic
                 if row_name not in merged[period]:
                     merged[period][row_name] = cols
 
-
     return merged
 
 
@@ -1558,9 +1610,10 @@ def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
     """
     Tüm sayfalardan free_text alır; sadece grup tablosu (KREDİ GRUBU FİRMA MEMZUÇLARI)
     sayfalarında _parse_memzuc_doluluk_from_text çalıştırıp satırları toplar.
-    Her sayfada sadece grup tablosuna ait segment parse edilir (Ortası olduğu / KKB vb. kesilir).
+    Devam sayfalarını da işler (sayfa 6 gibi: başlık yok ama TOPLAM/Umumi Limit var).
     """
     all_lines: List[str] = []
+    prev_had_grup = False
     for pd in pages:
         text = (
             getattr(pd, "free_text", None)
@@ -1568,10 +1621,24 @@ def _collect_memzuc_doluluk_from_pages(pages: List["_PageData"]) -> List[str]:
             or getattr(pd, "raw_text", None)
         )
         if not (text and str(text).strip()):
+            prev_had_grup = False
             continue
-        segment = _extract_grup_memzuc_segment_only(str(text).strip())
+
+        text_clean = str(text).strip()
+        segment = _extract_grup_memzuc_segment_only(text_clean)
+
+        if segment:
+            prev_had_grup = True
+        elif prev_had_grup:
+            segment = _extract_grup_continuation_segment(text_clean)
+            if not segment:
+                prev_had_grup = False
+        else:
+            continue
+
         if not segment:
             continue
+
         page_lines = _parse_memzuc_doluluk_from_text(segment)
         all_lines.extend(page_lines)
     return all_lines
