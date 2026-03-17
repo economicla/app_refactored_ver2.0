@@ -26,6 +26,27 @@ from app_refactored.core.entities import (
 logger = logging.getLogger(__name__)
 
 
+def _parse_money_value(text: str) -> Optional[float]:
+    """'1.234.567', '1,234,567', '1234567' gibi para değerlerini float'a çevirir."""
+    s = (text or "").strip().replace(" ", "")
+    if not s:
+        return None
+    s = s.replace("TL", "").replace("tl", "").replace("₺", "").strip()
+    if "." in s and "," in s:
+        if s.index(",") > s.rindex("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s and s.count(",") == 1 and len(s.split(",")[1]) <= 2:
+        s = s.replace(",", ".")
+    else:
+        s = s.replace(".", "").replace(",", "")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
 @dataclass
 class SourceWithMetadata:
     """Kaynak bilgisi (metadata ile)"""
@@ -689,6 +710,182 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         for row_name in self._MEMZUC_ROW_NAMES:
             val = period_data.get(row_name)
             lines.append(f"| {row_name} | {val if val is not None else '-'} |")
+        body = "\n".join(lines)
+        if not exact_match and requested_period:
+            body = (
+                f"*Raporda {requested_period} dönemi bulunamadı; en güncel dönem olan **{period_label}** gösteriliyor.*\n\n"
+                + body
+            )
+        return body
+
+    # ── Deterministik Memzuç Risk (K.V., O.V., U.V., Toplam Risk, Limit) ──────
+
+    _MEMZUC_RISK_COL_ALIASES: Dict[str, Tuple[str, ...]] = {
+        "Limit": ("limit",),
+        "K.V. Risk": ("k.v. risk", "kv risk", "kısa vadeli risk", "k.v risk"),
+        "O.V. Risk": ("o.v. risk", "ov risk", "orta vadeli risk", "o.v risk"),
+        "U.V. Risk": ("u.v. risk", "uv risk", "uzun vadeli risk", "u.v risk"),
+        "Toplam Risk": ("toplam risk",),
+        "Doluluk Oranı(%)": ("doluluk oranı", "doluluk oranı(%)", "doluluk orani", "doluluk"),
+    }
+
+    _MEMZUC_RISK_ROW_NAMES = (
+        "Toplam Nakdi Kredi", "Toplam GN Kredi", "TOPLAM", "Umumi Limit",
+    )
+
+    _MEMZUC_RISK_ROW_ALIASES: Dict[str, Tuple[str, ...]] = {
+        "Toplam Nakdi Kredi": ("toplam nakdi kredi", "toplamnakdikredi", "toplam nakdi"),
+        "Toplam GN Kredi": ("toplam gn kredi", "toplam g.nakdi kredi", "toplam gnkredi", "toplam gayrinakdi"),
+        "TOPLAM": ("toplam",),
+        "Umumi Limit": ("umumi limit", "umumilimit", "umumi"),
+    }
+
+    def _normalize_memzuc_risk_col(self, raw: str) -> Optional[str]:
+        r = (raw or "").strip().lower()
+        if not r:
+            return None
+        for canon, aliases in self._MEMZUC_RISK_COL_ALIASES.items():
+            if r == canon.lower() or r in aliases:
+                return canon
+        return None
+
+    def _normalize_memzuc_risk_row(self, raw: str) -> Optional[str]:
+        r = (raw or "").strip().lower()
+        if not r:
+            return None
+        for canon, aliases in self._MEMZUC_RISK_ROW_ALIASES.items():
+            if r == canon.lower() or r in aliases:
+                return canon
+            for a in aliases:
+                if a in r:
+                    return canon
+        return None
+
+    def _parse_memzuc_risk_from_chunks(
+        self, contents: List[Dict[str, str]]
+    ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """
+        Kredi Grubu Firma Memzuçları chunk'larından risk verilerini parse eder.
+        Returns: { "2025/12": { "Toplam Nakdi Kredi": {"Limit": 1234, "K.V. Risk": 567, ...}, ...}, ... }
+        """
+        combined = "\n".join((item.get("content") or "").replace("\r", "\n") for item in contents)
+        if not combined.strip():
+            return {}
+
+        result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        current_donem: Optional[str] = None
+        current_section: Optional[str] = None
+        period_re = re.compile(r"(?:^|\n)\s*#{1,3}\s*Dönem:\s*(20\d{2}\s*/\s*\d{1,2})")
+
+        for line in combined.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Bölüm tespiti: "## Memzuç — Kredi Grubu Firma Memzuçları"
+            if stripped.startswith("#"):
+                lo = stripped.lower()
+                if "kredi grubu" in lo and "memzuç" in lo.replace("memzuc", "memzuç"):
+                    current_section = "kredi_grubu"
+                    continue
+                elif any(k in lo for k in ("ortağı olduğu", "ortagi oldugu", "kkb ekranı", "kkb ekrani", "grup ana firma")):
+                    current_section = None
+                    continue
+                pm = period_re.match(stripped) or period_re.search(line)
+                if pm:
+                    current_donem = pm.group(1).replace(" ", "")
+                continue
+
+            if current_section != "kredi_grubu" or not current_donem:
+                continue
+
+            # Pipe-delimited satır: "col_0: Toplam Nakdi Kredi | Limit: 1234 | K.V. Risk: 567 | ..."
+            if "|" in stripped:
+                parts = [p.strip() for p in stripped.split("|")]
+                row_name_raw = None
+                col_values: Dict[str, Any] = {}
+                for part in parts:
+                    if ":" not in part:
+                        continue
+                    key_raw, val_raw = part.split(":", 1)
+                    key_raw = key_raw.strip()
+                    val_raw = val_raw.strip()
+                    col_canon = self._normalize_memzuc_risk_col(key_raw)
+                    if col_canon:
+                        num = _parse_money_value(val_raw)
+                        col_values[col_canon] = num if num is not None else val_raw
+                    elif not row_name_raw:
+                        row_canon = self._normalize_memzuc_risk_row(val_raw)
+                        if row_canon:
+                            row_name_raw = row_canon
+                if row_name_raw and col_values:
+                    result.setdefault(current_donem, {})[row_name_raw] = col_values
+
+        return result
+
+    def _detect_asked_risk_column(self, query: str) -> Optional[str]:
+        """Sorgudaki risk türünü tespit et."""
+        q = query.lower()
+        mappings = [
+            ("K.V. Risk", ("kısa vadeli risk", "k.v. risk", "kv risk", "kısa vadeli riski", "k.v risk")),
+            ("O.V. Risk", ("orta vadeli risk", "o.v. risk", "ov risk", "orta vadeli riski", "o.v risk")),
+            ("U.V. Risk", ("uzun vadeli risk", "u.v. risk", "uv risk", "uzun vadeli riski", "u.v risk")),
+            ("Toplam Risk", ("toplam risk", "toplam riski")),
+            ("Limit", ("limit", "limiti")),
+        ]
+        for canon, keywords in mappings:
+            if any(kw in q for kw in keywords):
+                return canon
+        return None
+
+    def _format_memzuc_risk_response(
+        self,
+        period_data: Dict[str, Dict[str, Any]],
+        period_label: str,
+        requested_period: Optional[str],
+        exact_match: bool,
+        asked_column: Optional[str],
+    ) -> str:
+        if not period_data:
+            return "Raporda bu dönem için memzuç risk verisi bulunamadı."
+
+        if asked_column:
+            lines = [
+                f"**{period_label} dönemi — Kredi Grubu Firma Memzuçları — {asked_column}**",
+                "",
+                f"| Kalem | {asked_column} |",
+                f"|-------|{'---' * len(asked_column)}|",
+            ]
+            for row_name in self._MEMZUC_RISK_ROW_NAMES:
+                row = period_data.get(row_name, {})
+                val = row.get(asked_column)
+                formatted = f"{val:,.0f} TL" if isinstance(val, (int, float)) and val else (str(val) if val else "-")
+                lines.append(f"| {row_name} | {formatted} |")
+        else:
+            all_cols = ["Limit", "K.V. Risk", "O.V. Risk", "U.V. Risk", "Toplam Risk", "Doluluk Oranı(%)"]
+            header_row = "| Kalem | " + " | ".join(all_cols) + " |"
+            sep_row = "|-------|" + "|".join("---" for _ in all_cols) + "|"
+            lines = [
+                f"**{period_label} dönemi — Kredi Grubu Firma Memzuçları**",
+                "",
+                header_row,
+                sep_row,
+            ]
+            for row_name in self._MEMZUC_RISK_ROW_NAMES:
+                row = period_data.get(row_name, {})
+                vals = []
+                for col in all_cols:
+                    v = row.get(col)
+                    if v is None:
+                        vals.append("-")
+                    elif col == "Doluluk Oranı(%)":
+                        vals.append(f"{v}%")
+                    elif isinstance(v, (int, float)):
+                        vals.append(f"{v:,.0f}")
+                    else:
+                        vals.append(str(v))
+                lines.append(f"| {row_name} | " + " | ".join(vals) + " |")
+
         body = "\n".join(lines)
         if not exact_match and requested_period:
             body = (
@@ -1991,7 +2188,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     logger.warning(f"⚠️ Deterministik Piyasa toplama hatası, LLM yoluna düşülüyor: {e}")
                     debug_info.setdefault("piyasa_deterministic", {})["error"] = str(e)
 
-            # Deterministik Memzuc Doluluk: sorguda memzuc/doluluk geçiyorsa doluluk tablosu dön; ama kısa/orta/uzun vadeli risk veya toplam risk soruluyorsa normal RAG ile tablonun tam metninden cevaplansın
+            # Deterministik Memzuc: doluluk + risk (K.V., O.V., U.V., Toplam) sorguları
             routing_m = debug_info.get("routing_decision") or {}
             q_lo = query.query.lower()
             _MEMZUC_TRIGGER_KEYWORDS = (
@@ -2002,7 +2199,6 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 "uzun vadeli risk", "u.v. risk", "uv risk", "toplam risk", "kısa vadeli riski",
                 "kısa vadeli risk oranı", "k.v risk", "temerrüt", "faiz reeskont",
             )
-            # Tek firma soruluyorsa deterministik doluluk (grup tablosu) kullanma; normal RAG ile o firma chunk'ından cevaplansın
             _MEMZUC_SINGLE_FIRMA_KEYWORDS = (
                 "aktül kağıt", "aktul kagit", "bahariye mensucat", "bahariye tekstil",
                 "mks marmara", "mustafa latif topbaş", "mustafa latif topbas",
@@ -2013,10 +2209,8 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             )
             asks_for_single_firma = any(kw in q_lo for kw in _MEMZUC_SINGLE_FIRMA_KEYWORDS)
             asks_for_risk_or_limit = any(kw in q_lo for kw in _MEMZUC_RISK_KEYWORDS)
-            use_memzuc_doluluk_only = (
-                is_memzuc_query and not asks_for_risk_or_limit and not asks_for_single_firma
-            )
-            if use_memzuc_doluluk_only and hasattr(self.document_repository, "get_memzuc_lines"):
+
+            if is_memzuc_query and not asks_for_single_firma and hasattr(self.document_repository, "get_memzuc_lines"):
                 try:
                     get_memzuc_lines = getattr(self.document_repository, "get_memzuc_lines")
                     preferred_filename = getattr(reranked_docs[0], "filename", None) if reranked_docs else None
@@ -2026,53 +2220,104 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     )
                     if not memzuc_chunks and preferred_filename:
                         memzuc_chunks = await get_memzuc_lines(filename=None, doc_type="İstihbarat Raporu")
-                    # Önce yapılandırılmış JSON'dan oku (sadece grup tablosu; ortak/KKB/tek firma karışmaz)
-                    period_to_data = self._parse_memzuc_structured_json_from_contents(memzuc_chunks)
-                    if not period_to_data:
-                        period_to_data = self._parse_memzuc_doluluk_from_contents(memzuc_chunks)
-                    periods_found = sorted(period_to_data.keys()) if period_to_data else []
+
                     requested_period = self._extract_requested_period_from_query(query.query)
-                    selected_period, exact_match = self._select_closest_period(
-                        requested_period, periods_found
-                    )
-                    if selected_period and period_to_data.get(selected_period):
-                        period_data = period_to_data[selected_period]
-                        answer = self._format_memzuc_doluluk_response(
-                            period_data,
-                            selected_period,
-                            requested_period,
-                            exact_match,
+
+                    if asks_for_risk_or_limit:
+                        # Risk/Limit sorgusu: chunk'lardan K.V./O.V./U.V. Risk, Limit, Toplam Risk parse et
+                        risk_data = self._parse_memzuc_risk_from_chunks(memzuc_chunks)
+                        periods_found = sorted(risk_data.keys()) if risk_data else []
+                        selected_period, exact_match = self._select_closest_period(
+                            requested_period, periods_found
                         )
-                        row_count = len(period_data)
-                        debug_info["memzuc_deterministic"] = True
-                        debug_info["memzuc_periods_found"] = periods_found
-                        debug_info["memzuc_requested_period"] = requested_period
-                        debug_info["memzuc_selected_period"] = selected_period
-                        debug_info["memzuc_row_count"] = row_count
-                        sources_memzuc = [
-                            SourceWithMetadata(
-                                filename=getattr(d, "filename", ""),
-                                chunk_index=getattr(d, "chunk_index", 0),
-                                header=None,
-                                similarity_score=getattr(d, "similarity_score", 0),
-                                content_preview=(getattr(d, "content", "") or "")[:150],
-                                chunk_size=len(getattr(d, "content", "") or ""),
+                        asked_column = self._detect_asked_risk_column(query.query)
+                        if selected_period and risk_data.get(selected_period):
+                            period_data = risk_data[selected_period]
+                            answer = self._format_memzuc_risk_response(
+                                period_data,
+                                selected_period,
+                                requested_period,
+                                exact_match,
+                                asked_column,
                             )
-                            for d in reranked_docs[:5]
-                        ]
-                        logger.info(
-                            f"📊 Deterministik Memzuc doluluk: selected_period={selected_period}, "
-                            f"periods_found={periods_found}, row_count={row_count} (LLM atlandı)"
+                            debug_info["memzuc_deterministic"] = True
+                            debug_info["memzuc_type"] = "risk"
+                            debug_info["memzuc_asked_column"] = asked_column
+                            debug_info["memzuc_periods_found"] = periods_found
+                            debug_info["memzuc_requested_period"] = requested_period
+                            debug_info["memzuc_selected_period"] = selected_period
+                            sources_memzuc = [
+                                SourceWithMetadata(
+                                    filename=getattr(d, "filename", ""),
+                                    chunk_index=getattr(d, "chunk_index", 0),
+                                    header=None,
+                                    similarity_score=getattr(d, "similarity_score", 0),
+                                    content_preview=(getattr(d, "content", "") or "")[:150],
+                                    chunk_size=len(getattr(d, "content", "") or ""),
+                                )
+                                for d in reranked_docs[:5]
+                            ]
+                            logger.info(
+                                f"📊 Deterministik Memzuc risk: column={asked_column}, "
+                                f"period={selected_period}, periods={periods_found} (LLM atlandı)"
+                            )
+                            return RAGResponse(
+                                question=query.query,
+                                answer=answer,
+                                sources=sources_memzuc,
+                                model=await self.llm_service.get_model_name(),
+                                timestamp=datetime.utcnow(),
+                                user_id=query.user_id,
+                                debug_info=debug_info,
+                            )
+                    else:
+                        # Doluluk sorgusu: mevcut doluluk akışı
+                        period_to_data = self._parse_memzuc_structured_json_from_contents(memzuc_chunks)
+                        if not period_to_data:
+                            period_to_data = self._parse_memzuc_doluluk_from_contents(memzuc_chunks)
+                        periods_found = sorted(period_to_data.keys()) if period_to_data else []
+                        selected_period, exact_match = self._select_closest_period(
+                            requested_period, periods_found
                         )
-                        return RAGResponse(
-                            question=query.query,
-                            answer=answer,
-                            sources=sources_memzuc,
-                            model=await self.llm_service.get_model_name(),
-                            timestamp=datetime.utcnow(),
-                            user_id=query.user_id,
-                            debug_info=debug_info,
-                        )
+                        if selected_period and period_to_data.get(selected_period):
+                            period_data = period_to_data[selected_period]
+                            answer = self._format_memzuc_doluluk_response(
+                                period_data,
+                                selected_period,
+                                requested_period,
+                                exact_match,
+                            )
+                            row_count = len(period_data)
+                            debug_info["memzuc_deterministic"] = True
+                            debug_info["memzuc_type"] = "doluluk"
+                            debug_info["memzuc_periods_found"] = periods_found
+                            debug_info["memzuc_requested_period"] = requested_period
+                            debug_info["memzuc_selected_period"] = selected_period
+                            debug_info["memzuc_row_count"] = row_count
+                            sources_memzuc = [
+                                SourceWithMetadata(
+                                    filename=getattr(d, "filename", ""),
+                                    chunk_index=getattr(d, "chunk_index", 0),
+                                    header=None,
+                                    similarity_score=getattr(d, "similarity_score", 0),
+                                    content_preview=(getattr(d, "content", "") or "")[:150],
+                                    chunk_size=len(getattr(d, "content", "") or ""),
+                                )
+                                for d in reranked_docs[:5]
+                            ]
+                            logger.info(
+                                f"📊 Deterministik Memzuc doluluk: selected_period={selected_period}, "
+                                f"periods_found={periods_found}, row_count={row_count} (LLM atlandı)"
+                            )
+                            return RAGResponse(
+                                question=query.query,
+                                answer=answer,
+                                sources=sources_memzuc,
+                                model=await self.llm_service.get_model_name(),
+                                timestamp=datetime.utcnow(),
+                                user_id=query.user_id,
+                                debug_info=debug_info,
+                            )
                 except Exception as e:
                     logger.warning(
                         f"⚠️ Deterministik Memzuc toplama hatası, LLM yoluna düşülüyor: {e}"
