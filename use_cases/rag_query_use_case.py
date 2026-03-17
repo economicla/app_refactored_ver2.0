@@ -766,12 +766,20 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
     ) -> Dict[str, Dict[str, Dict[str, Any]]]:
         """
         Kredi Grubu Firma Memzuçları chunk'larından risk verilerini parse eder.
+        Öncelik 1: MEMZUC_RISK_STRUCTURED_JSON (metin tabanlı, segment filtreli — en güvenilir)
+        Öncelik 2: Markdown heading + pipe-delimited satırlardan parse
         Returns: { "2025/12": { "Toplam Nakdi Kredi": {"Limit": 1234, "K.V. Risk": 567, ...}, ...}, ... }
         """
         combined = "\n".join((item.get("content") or "").replace("\r", "\n") for item in contents)
         if not combined.strip():
             return {}
 
+        # Öncelik 1: MEMZUC_RISK_STRUCTURED_JSON — extractor tarafından metin tabanlı, segment filtreli üretilir
+        json_result = self._parse_memzuc_risk_json_from_combined(combined)
+        if json_result:
+            return json_result
+
+        # Öncelik 2: Markdown heading tabanlı fallback
         result: Dict[str, Dict[str, Dict[str, Any]]] = {}
         current_donem: Optional[str] = None
         current_section: Optional[str] = None
@@ -782,10 +790,9 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             if not stripped:
                 continue
 
-            # Bölüm tespiti: "## Memzuç — Kredi Grubu Firma Memzuçları"
             if stripped.startswith("#"):
                 lo = stripped.lower()
-                if "kredi grubu" in lo and "memzuç" in lo.replace("memzuc", "memzuç"):
+                if "kredi grubu" in lo and ("memzuç" in lo or "memzuc" in lo or "risk" in lo):
                     current_section = "kredi_grubu"
                     continue
                 elif any(k in lo for k in ("ortağı olduğu", "ortagi oldugu", "kkb ekranı", "kkb ekrani", "grup ana firma")):
@@ -799,7 +806,6 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             if current_section != "kredi_grubu" or not current_donem:
                 continue
 
-            # Pipe-delimited satır: "col_0: Toplam Nakdi Kredi | Limit: 1234 | K.V. Risk: 567 | ..."
             if "|" in stripped:
                 parts = [p.strip() for p in stripped.split("|")]
                 row_name_raw = None
@@ -822,6 +828,43 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     result.setdefault(current_donem, {})[row_name_raw] = col_values
 
         return result
+
+    def _parse_memzuc_risk_json_from_combined(
+        self, combined: str
+    ) -> Optional[Dict[str, Dict[str, Dict[str, Any]]]]:
+        """MEMZUC_RISK_STRUCTURED_JSON etiketini bulur ve JSON olarak parse eder."""
+        tag = "MEMZUC_RISK_STRUCTURED_JSON="
+        idx = combined.find(tag)
+        if idx == -1:
+            return None
+        rest = combined[idx + len(tag):]
+        first_line = rest.split("\n")[0].strip()
+        if not first_line.startswith("{"):
+            return None
+        try:
+            payload = json.loads(first_line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for period, rows in payload.items():
+            if not isinstance(rows, dict):
+                continue
+            for row_name, cols in rows.items():
+                if not isinstance(cols, dict):
+                    continue
+                canon_row = self._normalize_memzuc_risk_row(row_name)
+                if not canon_row:
+                    continue
+                typed_cols: Dict[str, Any] = {}
+                for ck, cv in cols.items():
+                    canon_col = self._normalize_memzuc_risk_col(ck)
+                    if canon_col:
+                        typed_cols[canon_col] = cv
+                if typed_cols:
+                    result.setdefault(period, {})[canon_row] = typed_cols
+        return result if result else None
 
     def _detect_asked_risk_column(self, query: str) -> Optional[str]:
         """Sorgudaki risk türünü tespit et."""
