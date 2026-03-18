@@ -2785,7 +2785,16 @@ class CreditIntelligencePDFExtractor:
                             raw_headers = ["Kalem"]
                             for i, c in enumerate(row[1:], 1):
                                 raw_headers.append(c.strip() if c else f"col_{i}")
+                            logger.info(
+                                "MEMZUC period row [%s] raw_headers(%d): %s | row cells(%d): %s",
+                                current_period, len(raw_headers), raw_headers,
+                                len(row), [c[:30] if c else '' for c in row],
+                            )
                             effective_headers, header_skip_indices = _normalize_memzuc_table_headers(raw_headers)
+                            logger.info(
+                                "MEMZUC normalized headers(%d): %s | skip_indices: %s",
+                                len(effective_headers), effective_headers, header_skip_indices,
+                            )
                             headers_detected = True
                         continue
 
@@ -2807,6 +2816,17 @@ class CreditIntelligencePDFExtractor:
                         data_row = row
                         if header_skip_indices and len(row) > len(effective_headers):
                             data_row = [c for i, c in enumerate(row) if i not in header_skip_indices]
+                            logger.info(
+                                "MEMZUC data skip applied: row(%d)→data_row(%d) skip=%s",
+                                len(row), len(data_row), header_skip_indices,
+                            )
+                        kalem_raw = (data_row[0] or "").strip() if data_row else ""
+                        if "toplam" in kalem_raw.lower() or "umumi" in kalem_raw.lower():
+                            logger.info(
+                                "MEMZUC summary row [%s]: headers(%d)=%s | data(%d)=%s",
+                                kalem_raw, len(effective_headers), effective_headers,
+                                len(data_row), [c[:20] if c else '' for c in data_row],
+                            )
                         for i, h in enumerate(effective_headers):
                             val = data_row[i] if i < len(data_row) else ""
                             num = _parse_number(val)
