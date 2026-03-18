@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -1470,6 +1470,80 @@ _MEMZUC_RISK_ROW_ALIASES: Dict[str, Tuple[str, ...]] = {
 
 _MEMZUC_RISK_COL_NAMES = ("Limit", "K.V. Risk", "O.V. Risk", "U.V. Risk", "Toplam Risk", "Doluluk Oranı(%)")
 
+
+def _normalize_memzuc_table_headers(
+    headers: List[str],
+) -> Tuple[List[str], Set[int]]:
+    """
+    pdfplumber bazen çok satırlı başlık hücrelerini ayrı kolonlara böler.
+
+    Durum 1 — Tek hücre: "Faiz Reeskont + Komisyon"
+       _clean_cell newline'ları space yapar → tek header gelir.
+       Kanonik isme yeniden adlandırılır: "Reeskont+Komisyon"
+
+    Durum 2 — İki hücre: "Reeskont+Komisyon" + "Faiz" (veya tersi)
+       "Faiz" phantom kolon olarak işaretlenir, skip edilir.
+
+    Benzer mantık "Doluluk" / "Oranı(%)" bölünmesi için de geçerli.
+
+    Returns: (normalized_headers, skip_indices)
+    """
+    skip: Set[int] = set()
+
+    # --- Faiz / Reeskont+Komisyon split detection ---
+    faiz_idx: Optional[int] = None
+    reeskont_idx: Optional[int] = None
+    for i, h in enumerate(headers):
+        lo = (h or "").strip().lower()
+        if lo == "faiz":
+            faiz_idx = i
+        if "reeskont" in lo or "komisyon" in lo:
+            reeskont_idx = i
+    if faiz_idx is not None and reeskont_idx is not None:
+        skip.add(faiz_idx)
+
+    # --- Doluluk / Oranı split detection ---
+    doluluk_idx: Optional[int] = None
+    has_orani = False
+    for i, h in enumerate(headers):
+        lo = (h or "").strip().lower()
+        if lo == "doluluk":
+            doluluk_idx = i
+        if "oranı" in lo or "orani" in lo:
+            has_orani = True
+    if doluluk_idx is not None and has_orani:
+        skip.add(doluluk_idx)
+
+    normalized = [h for i, h in enumerate(headers) if i not in skip]
+
+    # --- Canonical rename pass ---
+    _PARTIAL_RENAMES = {
+        # Combined "Faiz Reeskont+Komisyon" variants (Durum 1)
+        "faiz reeskont+komisyon": "Reeskont+Komisyon",
+        "faiz reeskont + komisyon": "Reeskont+Komisyon",
+        "faiz reeskont +komisyon": "Reeskont+Komisyon",
+        "faiz reeskont+ komisyon": "Reeskont+Komisyon",
+        "faizreeskont+komisyon": "Reeskont+Komisyon",
+        # Doluluk Oranı variants
+        "oranı(%)": "Doluluk Oranı(%)",
+        "orani(%)": "Doluluk Oranı(%)",
+        "oranı": "Doluluk Oranı(%)",
+        "orani": "Doluluk Oranı(%)",
+        "doluluk oranı": "Doluluk Oranı(%)",
+        "doluluk orani": "Doluluk Oranı(%)",
+        "doluluk oranı(%)": "Doluluk Oranı(%)",
+        "doluluk orani(%)": "Doluluk Oranı(%)",
+    }
+    for j, h in enumerate(normalized):
+        lo = (h or "").strip().lower()
+        if lo in _PARTIAL_RENAMES:
+            normalized[j] = _PARTIAL_RENAMES[lo]
+        elif "reeskont" in lo or "komisyon" in lo:
+            normalized[j] = "Reeskont+Komisyon"
+
+    return normalized, skip
+
+
 def _normalize_risk_row_kalem(kalem: str) -> Optional[str]:
     """Kalem (satir adi) degerini kanonik risk satir adina cevir."""
     if not kalem:
@@ -2665,6 +2739,7 @@ class CreditIntelligencePDFExtractor:
             for tbl_idx, tbl in enumerate(pd.tables):
                 headers_detected = False
                 effective_headers: Optional[List[str]] = None
+                header_skip_indices: Set[int] = set()
 
                 # bbox-based sub-section assignment
                 if tbl_idx < len(pd.table_bboxes):
@@ -2677,6 +2752,7 @@ class CreditIntelligencePDFExtractor:
                         current_period = None
                         headers_detected = False
                         effective_headers = None
+                        header_skip_indices = set()
 
                 # fallback: detect from table row content (legacy path)
                 for row in tbl:
@@ -2693,6 +2769,7 @@ class CreditIntelligencePDFExtractor:
                         current_sub = matched_sub
                         headers_detected = False
                         effective_headers = None
+                        header_skip_indices = set()
                         current_period = None
                         continue
 
@@ -2705,9 +2782,10 @@ class CreditIntelligencePDFExtractor:
                         current_period = first_cell.replace(" ", "")
                         non_empty_rest = [c for c in row[1:] if (c or "").strip()]
                         if non_empty_rest:
-                            effective_headers = ["Kalem"]
+                            raw_headers = ["Kalem"]
                             for i, c in enumerate(row[1:], 1):
-                                effective_headers.append(c.strip() if c else f"col_{i}")
+                                raw_headers.append(c.strip() if c else f"col_{i}")
+                            effective_headers, header_skip_indices = _normalize_memzuc_table_headers(raw_headers)
                             headers_detected = True
                         continue
 
@@ -2716,7 +2794,8 @@ class CreditIntelligencePDFExtractor:
                             1 for c in row if c and _parse_number(c) is None
                         )
                         if non_numeric >= len(row) * 0.5 and len(row) >= 2:
-                            effective_headers = [c if c else f"col_{i}" for i, c in enumerate(row)]
+                            raw_headers = [c if c else f"col_{i}" for i, c in enumerate(row)]
+                            effective_headers, header_skip_indices = _normalize_memzuc_table_headers(raw_headers)
                             headers_detected = True
                             continue
 
@@ -2725,8 +2804,11 @@ class CreditIntelligencePDFExtractor:
 
                     entry: Dict[str, Any] = {}
                     if effective_headers:
+                        data_row = row
+                        if header_skip_indices and len(row) > len(effective_headers):
+                            data_row = [c for i, c in enumerate(row) if i not in header_skip_indices]
                         for i, h in enumerate(effective_headers):
-                            val = row[i] if i < len(row) else ""
+                            val = data_row[i] if i < len(data_row) else ""
                             num = _parse_number(val)
                             entry[h] = num if num is not None else val
                     else:
