@@ -1470,6 +1470,113 @@ _MEMZUC_RISK_ROW_ALIASES: Dict[str, Tuple[str, ...]] = {
 
 _MEMZUC_RISK_COL_NAMES = ("Limit", "K.V. Risk", "O.V. Risk", "U.V. Risk", "Toplam Risk", "Doluluk Oranı(%)")
 
+def _normalize_risk_row_kalem(kalem: str) -> Optional[str]:
+    """Kalem (satir adi) degerini kanonik risk satir adina cevir."""
+    if not kalem:
+        return None
+    lo = kalem.strip().lower()
+    if "toplam nakdi kredi" in lo:
+        return "Toplam Nakdi Kredi"
+    if "toplam gn kredi" in lo or "toplam g.nakdi" in lo or "toplam gayrinakdi" in lo:
+        return "Toplam GN Kredi"
+    if "umumi limit" in lo or "umumilimit" in lo:
+        return "Umumi Limit"
+    if re.match(r"^\s*toplam\s*$", lo):
+        return "TOPLAM"
+    return None
+
+
+def _build_memzuc_risk_from_table(
+    memzuc_bilgileri: Dict[str, List[Dict[str, Any]]],
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """
+    _build_memzuc sonucundan (tablo verisi) kredi_grubu_firma_memzuclari
+    alt bolumundeki ozet satirlarini (Toplam Nakdi Kredi, Toplam GN Kredi,
+    TOPLAM, Umumi Limit) cikarir ve donem bazli risk dict olusturur.
+
+    Tablo verisinden gelir → kolon degerleri dogru, sequential parser yok.
+
+    Returns: { "2025/12": { "Toplam Nakdi Kredi": {"Limit": 8412348287, ...}, ... }, ... }
+    """
+    entries = memzuc_bilgileri.get("kredi_grubu_firma_memzuclari", [])
+    if not entries:
+        return {}
+
+    result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+    for entry in entries:
+        donem = entry.get("donem")
+        if not donem:
+            continue
+
+        kalem_raw = entry.get("Kalem", "") or entry.get("col_0", "")
+        kalem = _normalize_risk_row_kalem(str(kalem_raw))
+        if not kalem:
+            continue
+
+        _META_KEYS = {"Kalem", "col_0", "donem", "source_page"}
+        cols: Dict[str, Any] = {}
+        for key, val in entry.items():
+            if key in _META_KEYS:
+                continue
+            if val is not None and val != "":
+                cols[key] = val
+
+        if not cols:
+            continue
+
+        result.setdefault(donem, {})[kalem] = cols
+
+    return result
+
+
+def _build_memzuc_doluluk_from_table(
+    memzuc_bilgileri: Dict[str, List[Dict[str, Any]]],
+) -> List[str]:
+    """
+    _build_memzuc sonucundan (tablo verisi) kredi_grubu_firma_memzuclari
+    alt bolumundeki ozet satirlarinin Doluluk Orani(%) degerlerini cikarir.
+
+    Returns: ["MEMZUC_DOLULUK | donem: 2025/12 | kalem: Toplam Nakdi Kredi | doluluk: 25", ...]
+    """
+    entries = memzuc_bilgileri.get("kredi_grubu_firma_memzuclari", [])
+    if not entries:
+        return []
+
+    lines: List[str] = []
+
+    for entry in entries:
+        donem = entry.get("donem")
+        if not donem:
+            continue
+
+        kalem_raw = entry.get("Kalem", "") or entry.get("col_0", "")
+        kalem = _normalize_risk_row_kalem(str(kalem_raw))
+        if not kalem:
+            continue
+
+        doluluk = None
+        for key_candidate in ("Doluluk Oranı(%)", "Doluluk\nOranı(%)", "Doluluk Orani(%)"):
+            if key_candidate in entry:
+                doluluk = entry[key_candidate]
+                break
+        if doluluk is None:
+            for k, v in entry.items():
+                if "doluluk" in k.lower() or "oran" in k.lower():
+                    doluluk = v
+                    break
+
+        if doluluk is not None:
+            try:
+                pct = int(float(doluluk))
+            except (ValueError, TypeError):
+                continue
+            lines.append(
+                f"MEMZUC_DOLULUK | dönem: {donem} | kalem: {kalem} | doluluk: {pct}"
+            )
+
+    return lines
+
 
 # Binlik noktalı sayı: "8.412.348.287", "75.518", "0", "60.000"
 _THOUSAND_NUM_RE = re.compile(r"\b\d{1,3}(?:\.\d{3})*\b")
@@ -1856,11 +1963,26 @@ class CreditIntelligencePDFExtractor:
         # Build each section from the assigned data
         sections = self._build_sections(assigned, warnings)
 
-        # Memzuc doluluk: words-based (öncelik) veya tüm sayfalardan text fallback
-        memzuc_fallback = memzuc_lines_from_words
+        # ---- Tablo-merkezli memzuc extraction (birincil kaynak) ----
+        memzuc_bilgileri = sections.get("memzuc_bilgileri", {})
+
+        # Risk verisi: tablo verisinden (kredi_grubu alt bölümü, özet satırları)
+        memzuc_risk_data = _build_memzuc_risk_from_table(memzuc_bilgileri)
+        if memzuc_risk_data:
+            sections["memzuc_risk_structured"] = memzuc_risk_data
+            logger.info(
+                "Memzuc risk (TABLE-based): %s dönem, kalemler: %s",
+                len(memzuc_risk_data),
+                {p: list(rows.keys()) for p, rows in memzuc_risk_data.items()},
+            )
+
+        # Doluluk: tablo verisinden (kredi_grubu, Doluluk Oranı(%) kolonu)
+        table_doluluk = _build_memzuc_doluluk_from_table(memzuc_bilgileri)
+
+        # Fallback: words parser veya text-based (eski yol)
+        memzuc_fallback = table_doluluk or memzuc_lines_from_words
         if not memzuc_fallback:
             memzuc_fallback = _collect_memzuc_doluluk_from_pages(pages_data)
-        # Aynı (dönem, kalem) birden fazla sayfa/chunk'ta farklı değerle gelirse tek satırda max al
         if memzuc_fallback:
             before_merge = len(memzuc_fallback)
             memzuc_fallback = _merge_memzuc_lines_across_pages(memzuc_fallback)
@@ -1876,11 +1998,13 @@ class CreditIntelligencePDFExtractor:
             if memzuc_words_debug:
                 memzuc_words_debug["extracted_rows_count"] = len(memzuc_fallback)
             logger.info(
-                "Memzuc doluluk: %s satır (words_parser_used=%s)",
+                "Memzuc doluluk: %s satır (table_based=%s, words_parser=%s)",
                 len(memzuc_fallback),
+                bool(table_doluluk),
                 memzuc_words_debug.get("words_parser_used", False),
             )
-        # Memzuç bölümünün tamamı: tek JSON (grup + grup_ana_firma, ortagi_oldugu, kkb_iliskili vb.)
+
+        # Yapılandırılmış memzuç bölümü (tüm alt bölümler)
         group_from_fallback = (
             _build_memzuc_structured_from_fallback(memzuc_fallback) if memzuc_fallback else []
         )
@@ -1901,15 +2025,15 @@ class CreditIntelligencePDFExtractor:
                 [x.get("section_type") for x in memzuc_structured_list],
             )
 
-        # Memzuc Risk (K.V., O.V., U.V., Toplam Risk, Limit): metin tabanlı, segment filtreli
-        memzuc_risk_data = _collect_memzuc_risk_from_pages(pages_data)
-        if memzuc_risk_data:
-            sections["memzuc_risk_structured"] = memzuc_risk_data
-            logger.info(
-                "Memzuc risk structured: %s dönem, kalemleri: %s",
-                len(memzuc_risk_data),
-                {p: list(rows.keys()) for p, rows in memzuc_risk_data.items()},
-            )
+        # Text-based risk fallback (tablo-based boşsa)
+        if not memzuc_risk_data:
+            text_risk = _collect_memzuc_risk_from_pages(pages_data)
+            if text_risk:
+                sections["memzuc_risk_structured"] = text_risk
+                logger.info(
+                    "Memzuc risk (TEXT fallback): %s dönem",
+                    len(text_risk),
+                )
 
         debug_payload: Dict[str, Any] = {
             "section_hits": section_hits,
@@ -1938,14 +2062,20 @@ class CreditIntelligencePDFExtractor:
     ) -> "_PageData":
         """Extract text + tables from a single pdfplumber page."""
         tables_raw: List[List[List[str]]] = []
+        table_bboxes: List[tuple] = []
         free_text = ""
 
         try:
-            raw_tables = page.extract_tables() or []
-            for tbl in raw_tables:
-                cleaned = [[_clean_cell(c) for c in row] for row in tbl if row]
-                if cleaned:
-                    tables_raw.append(cleaned)
+            found_tables = page.find_tables() or []
+            for tbl_obj in found_tables:
+                try:
+                    data = tbl_obj.extract() or []
+                    cleaned = [[_clean_cell(c) for c in row] for row in data if row]
+                    if cleaned:
+                        tables_raw.append(cleaned)
+                        table_bboxes.append(tbl_obj.bbox)
+                except Exception:
+                    pass
         except Exception as exc:
             warnings.append(f"page {page_num}: table extraction error: {exc}")
 
@@ -1978,6 +2108,7 @@ class CreditIntelligencePDFExtractor:
             tables=tables_raw,
             free_text=free_text,
             table_count=len(tables_raw),
+            table_bboxes=table_bboxes,
         )
 
     def _looks_like_banka_istihbarati(self, pd: "_PageData") -> bool:
@@ -2440,38 +2571,120 @@ class CreditIntelligencePDFExtractor:
 
     _MEMZUC_PERIOD_RE = re.compile(r"^(20\d{2}\s*/\s*\d{1,2})$")
 
+    # Sub-section patterns — specific first to avoid "grup" matching "kredi grubu"
+    _MEMZUC_SUB_MATCH_ORDER = [
+        ("kredi_grubu_firma_memzuclari", (
+            "kredi grubu firma", "kredi grubu",
+            "memzuçları (ana firma dahil)", "memzuculari (ana firma dahil)",
+        )),
+        ("ortagi_oldugu_sirketlerin_memzuclari", (
+            "ortağı olduğu", "ortagi oldugu",
+            "ortağı olduğu şirketlerin memzuçları",
+        )),
+        ("kkb_ekrani_iliskili_firma_memzuclari", (
+            "kkb ekranı", "kkb ekrani", "ilişkili firma",
+            "kkb ekranı ilişkili firma",
+        )),
+        ("grup_ana_firma_memzucu", (
+            "grup ana firma", "ana firma memzucu", "ana firma memzuçu",
+        )),
+    ]
+    _MEMZUC_SUB_KEY_NAMES = [sk for sk, _ in _MEMZUC_SUB_MATCH_ORDER]
+
+    @staticmethod
+    def _detect_memzuc_subsections_from_text(
+        free_text: str,
+    ) -> List[Tuple[str, float]]:
+        """
+        free_text icinden memzuc alt bolum basliklarini ve goreli konumlarini (0..1) cikarir.
+        Returns: [(sub_key, relative_position), ...] — ust bolum once.
+        relative_position = basligin free_text icerisindeki satir/toplam_satir orani.
+        """
+        if not free_text or not free_text.strip():
+            return []
+
+        lines = free_text.split("\n")
+        total = max(len(lines), 1)
+        found: List[Tuple[str, float]] = []
+
+        for idx, line in enumerate(lines):
+            lo = line.lower().strip()
+            if not lo:
+                continue
+            for sk, patterns in CreditIntelligencePDFExtractor._MEMZUC_SUB_MATCH_ORDER:
+                if any(p in lo for p in patterns):
+                    found.append((sk, idx / total))
+                    break
+
+        return found
+
+    @staticmethod
+    def _assign_sub_for_table(
+        table_bbox_top: float,
+        page_height: float,
+        sub_headers: List[Tuple[str, float]],
+    ) -> Optional[str]:
+        """
+        Tablonun bbox.top degerine gore, hemen ustundeki alt bolum basligini belirler.
+        sub_headers: [(sub_key, relative_position), ...]
+        table_bbox_top: pdfplumber bbox y0 (sayfanin ustunden piksel)
+        """
+        if not sub_headers:
+            return None
+
+        table_rel = table_bbox_top / max(page_height, 1)
+
+        best_sub = None
+        for sk, rel_pos in sub_headers:
+            if rel_pos <= table_rel + 0.02:
+                best_sub = sk
+        return best_sub
+
     def _build_memzuc(
         self, pages: List["_PageData"], warnings: List[str]
     ) -> Dict:
         """
-        Memzuç has sub-sections: grup/ana firma, kredi grubu, ortağı olduğu, KKB ilişkili.
-        Detect sub-headers inside the tables and split accordingly.
-        Dönem satırları (2025/12, 2024/12 vb.) algılanır ve her entry'e "donem" eklenir.
+        Memzuc alt bolumlerini bbox + free_text ile dogru etiketler.
+        Tablo verileri (kolon yapisi korunur) dogru alt bolume atanir.
+
+        Akis:
+        1. Her sayfanin free_text'inden alt bolum basliklarini ve konumlarini cikar
+        2. Her tablo icin bbox.top ile hemen ustundeki basliga gore sub_key ata
+        3. Baslik yoksa (continuation page) onceki sayfanin son sub_key'ini devral
+        4. Tablo satir verilerini dogru sub_key altinda topla
         """
-        # Sıralama kritik: "kredi grubu" en önce kontrol edilmeli; "grup" tek başına
-        # "kredi grubu" içindeki "grubu" ile de eşleşir, bu yüzden daha spesifik pattern önce.
-        _sub_match_order = [
-            ("kredi_grubu_firma_memzuclari", ("kredi grubu firma", "kredi grubu")),
-            ("ortagi_oldugu_sirketlerin_memzuclari", ("ortağı olduğu", "ortagi oldugu")),
-            ("kkb_ekrani_iliskili_firma_memzuclari", ("kkb ekranı", "kkb ekrani", "ilişkili firma")),
-            ("grup_ana_firma_memzucu", ("grup ana firma", "ana firma memzucu", "ana firma memzuçu")),
-        ]
-        _sub_key_names = [sk for sk, _ in _sub_match_order]
-        result: Dict[str, List] = {k: [] for k in _sub_key_names}
+        result: Dict[str, List] = {k: [] for k in self._MEMZUC_SUB_KEY_NAMES}
         current_sub: Optional[str] = None
         current_period: Optional[str] = None
 
         for pd in pages:
-            for tbl in pd.tables:
+            sub_headers = self._detect_memzuc_subsections_from_text(pd.free_text)
+
+            page_height = 842.0  # A4 default; pdfplumber uses points
+
+            for tbl_idx, tbl in enumerate(pd.tables):
                 headers_detected = False
                 effective_headers: Optional[List[str]] = None
 
+                # bbox-based sub-section assignment
+                if tbl_idx < len(pd.table_bboxes):
+                    bbox = pd.table_bboxes[tbl_idx]
+                    tbl_top = bbox[1]  # y0 = top of table
+                    page_height = max(bbox[3] + 50, page_height)
+                    assigned = self._assign_sub_for_table(tbl_top, page_height, sub_headers)
+                    if assigned:
+                        current_sub = assigned
+                        current_period = None
+                        headers_detected = False
+                        effective_headers = None
+
+                # fallback: detect from table row content (legacy path)
                 for row in tbl:
                     combined = ' '.join(c or '' for c in row).strip()
                     combined_lower = combined.lower()
 
                     matched_sub = None
-                    for sk, patterns in _sub_match_order:
+                    for sk, patterns in self._MEMZUC_SUB_MATCH_ORDER:
                         if any(p in combined_lower for p in patterns):
                             matched_sub = sk
                             break
@@ -2486,7 +2699,6 @@ class CreditIntelligencePDFExtractor:
                     if not current_sub:
                         current_sub = "grup_ana_firma_memzucu"
 
-                    # Dönem satırı: ilk hücrede "2025/12" gibi, diğerleri "Limit", "K.V. Risk" vb. header
                     first_cell = (row[0] or "").strip() if row else ""
                     period_m = self._MEMZUC_PERIOD_RE.match(first_cell.replace(" ", ""))
                     if period_m:
@@ -2650,6 +2862,11 @@ class _PageData:
     tables: List[List[List[str]]]
     free_text: str
     table_count: int
+    table_bboxes: List[tuple] = None  # [(x0, top, x1, bottom), ...]
+
+    def __post_init__(self):
+        if self.table_bboxes is None:
+            self.table_bboxes = []
 
 
 # ---------------------------------------------------------------------------
