@@ -2037,18 +2037,21 @@ class CreditIntelligencePDFExtractor:
         # Build each section from the assigned data
         sections = self._build_sections(assigned, warnings)
 
-        # ---- Tablo-merkezli memzuc extraction (birincil kaynak) ----
+        # ---- Memzuc risk extraction ----
         memzuc_bilgileri = sections.get("memzuc_bilgileri", {})
 
-        # Risk verisi: tablo verisinden (kredi_grubu alt bölümü, özet satırları)
-        memzuc_risk_data = _build_memzuc_risk_from_table(memzuc_bilgileri)
+        # Birincil: text-based (free_text'ten sequential parsing — kolon kayması yok)
+        memzuc_risk_data = _collect_memzuc_risk_from_pages(pages_data)
         if memzuc_risk_data:
             sections["memzuc_risk_structured"] = memzuc_risk_data
-            logger.info(
-                "Memzuc risk (TABLE-based): %s dönem, kalemler: %s",
-                len(memzuc_risk_data),
-                {p: list(rows.keys()) for p, rows in memzuc_risk_data.items()},
-            )
+            print(f"[MEMZUC-DEBUG] risk TEXT-based: {len(memzuc_risk_data)} dönem, "
+                  f"kalemler: { {p: list(rows.keys()) for p, rows in memzuc_risk_data.items()} }")
+        else:
+            # Fallback: tablo verisinden (pdfplumber kolon hizalaması sorunlu olabilir)
+            table_risk = _build_memzuc_risk_from_table(memzuc_bilgileri)
+            if table_risk:
+                sections["memzuc_risk_structured"] = table_risk
+                print(f"[MEMZUC-DEBUG] risk TABLE-fallback: {len(table_risk)} dönem")
 
         # Doluluk: tablo verisinden (kredi_grubu, Doluluk Oranı(%) kolonu)
         table_doluluk = _build_memzuc_doluluk_from_table(memzuc_bilgileri)
@@ -2099,15 +2102,7 @@ class CreditIntelligencePDFExtractor:
                 [x.get("section_type") for x in memzuc_structured_list],
             )
 
-        # Text-based risk fallback (tablo-based boşsa)
-        if not memzuc_risk_data:
-            text_risk = _collect_memzuc_risk_from_pages(pages_data)
-            if text_risk:
-                sections["memzuc_risk_structured"] = text_risk
-                logger.info(
-                    "Memzuc risk (TEXT fallback): %s dönem",
-                    len(text_risk),
-                )
+        # (text-based artık birincil kaynak olarak yukarıda çalışıyor)
 
         debug_payload: Dict[str, Any] = {
             "section_hits": section_hits,
@@ -2139,16 +2134,8 @@ class CreditIntelligencePDFExtractor:
         table_bboxes: List[tuple] = []
         free_text = ""
 
-        _TABLE_SETTINGS = {
-            "vertical_strategy": "text",
-            "horizontal_strategy": "lines",
-            "snap_x_tolerance": 5,
-            "snap_y_tolerance": 5,
-            "text_x_tolerance": 5,
-        }
-
         try:
-            found_tables = page.find_tables(table_settings=_TABLE_SETTINGS) or []
+            found_tables = page.find_tables() or []
             for tbl_obj in found_tables:
                 try:
                     data = tbl_obj.extract() or []
