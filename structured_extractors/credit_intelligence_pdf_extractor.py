@@ -2139,8 +2139,15 @@ class CreditIntelligencePDFExtractor:
         table_bboxes: List[tuple] = []
         free_text = ""
 
+        _TABLE_SETTINGS = {
+            "snap_x_tolerance": 10,
+            "snap_y_tolerance": 5,
+            "join_x_tolerance": 10,
+            "join_y_tolerance": 5,
+        }
+
         try:
-            found_tables = page.find_tables() or []
+            found_tables = page.find_tables(table_settings=_TABLE_SETTINGS) or []
             for tbl_obj in found_tables:
                 try:
                     data = tbl_obj.extract() or []
