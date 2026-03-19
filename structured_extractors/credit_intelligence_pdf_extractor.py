@@ -2140,10 +2140,10 @@ class CreditIntelligencePDFExtractor:
         free_text = ""
 
         _TABLE_SETTINGS = {
-            "snap_x_tolerance": 10,
-            "snap_y_tolerance": 5,
-            "join_x_tolerance": 10,
-            "join_y_tolerance": 5,
+            "snap_x_tolerance": 50,
+            "snap_y_tolerance": 10,
+            "join_x_tolerance": 50,
+            "join_y_tolerance": 10,
         }
 
         try:
@@ -2815,18 +2815,84 @@ class CreditIntelligencePDFExtractor:
 
                     entry: Dict[str, Any] = {}
                     if effective_headers:
-                        data_row = row
-                        if header_skip_indices and len(row) > len(effective_headers):
-                            data_row = [c for i, c in enumerate(row) if i not in header_skip_indices]
-                            print(f"[MEMZUC-DEBUG] data skip: row({len(row)})→data_row({len(data_row)}) skip={header_skip_indices}")
-                        kalem_raw = (data_row[0] or "").strip() if data_row else ""
-                        if "toplam" in kalem_raw.lower() or "umumi" in kalem_raw.lower():
-                            print(f"[MEMZUC-DEBUG] summary [{kalem_raw}]: hdrs({len(effective_headers)})={effective_headers}")
-                            print(f"[MEMZUC-DEBUG] summary [{kalem_raw}]: data({len(data_row)})={[c[:20] if c else '' for c in data_row]}")
-                        for i, h in enumerate(effective_headers):
-                            val = data_row[i] if i < len(data_row) else ""
-                            num = _parse_number(val)
-                            entry[h] = num if num is not None else val
+                        phantom_count = sum(
+                            1 for h in effective_headers
+                            if not (h or "").strip() or re.match(r'^col_\d+$', h)
+                        )
+                        use_sequential = phantom_count > 2
+
+                        if use_sequential:
+                            real_headers = [
+                                h for h in effective_headers
+                                if (h or "").strip() and not re.match(r'^col_\d+$', h)
+                            ]
+                            phantom_positions = {
+                                i for i, h in enumerate(effective_headers)
+                                if not (h or "").strip() or re.match(r'^col_\d+$', h)
+                            }
+                            non_empty = []
+                            for idx, c in enumerate(row):
+                                val = (c or "").strip()
+                                if val:
+                                    non_empty.append((idx, val))
+
+                            # Remove artifact "0"s at phantom positions
+                            while len(non_empty) > len(real_headers):
+                                best_artifact = None
+                                best_score = -1
+                                for ne_idx, (orig_pos, val) in enumerate(non_empty):
+                                    if orig_pos not in phantom_positions:
+                                        continue
+                                    if _parse_number(val) != 0:
+                                        continue
+                                    prev_empty = (
+                                        not (row[orig_pos - 1] or "").strip()
+                                        if orig_pos > 0 else True
+                                    )
+                                    next_empty = (
+                                        not (row[orig_pos + 1] or "").strip()
+                                        if orig_pos + 1 < len(row) else True
+                                    )
+                                    score = int(prev_empty) + int(next_empty)
+                                    prev_num = (
+                                        _parse_number(row[orig_pos - 1])
+                                        if orig_pos > 0 and (row[orig_pos - 1] or "").strip()
+                                        else None
+                                    )
+                                    next_num = (
+                                        _parse_number(row[orig_pos + 1])
+                                        if orig_pos + 1 < len(row) and (row[orig_pos + 1] or "").strip()
+                                        else None
+                                    )
+                                    if prev_num is not None and prev_num > 0 and next_num is not None and next_num > 0:
+                                        score += 10
+                                    if score > best_score:
+                                        best_score = score
+                                        best_artifact = ne_idx
+                                if best_artifact is None:
+                                    break
+                                non_empty.pop(best_artifact)
+
+                            kalem_raw = non_empty[0][1] if non_empty else ""
+                            if "toplam" in kalem_raw.lower() or "umumi" in kalem_raw.lower():
+                                print(f"[MEMZUC-DEBUG] SEQ summary [{kalem_raw}]: real_hdrs({len(real_headers)})={real_headers}")
+                                print(f"[MEMZUC-DEBUG] SEQ summary [{kalem_raw}]: values({len(non_empty)})={[v for _, v in non_empty]}")
+
+                            for i, h in enumerate(real_headers):
+                                if i < len(non_empty):
+                                    val = non_empty[i][1]
+                                    num = _parse_number(val)
+                                    entry[h] = num if num is not None else val
+                                else:
+                                    entry[h] = ""
+                        else:
+                            data_row = row
+                            if header_skip_indices and len(row) > len(effective_headers):
+                                data_row = [c for i, c in enumerate(row) if i not in header_skip_indices]
+                            for i, h in enumerate(effective_headers):
+                                val = data_row[i] if i < len(data_row) else ""
+                                num = _parse_number(val)
+                                entry[h] = num if num is not None else val
                     else:
                         for i, c in enumerate(row):
                             num = _parse_number(c)
