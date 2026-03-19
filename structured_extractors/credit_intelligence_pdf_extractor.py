@@ -2140,10 +2140,11 @@ class CreditIntelligencePDFExtractor:
         free_text = ""
 
         _TABLE_SETTINGS = {
-            "snap_x_tolerance": 50,
-            "snap_y_tolerance": 10,
-            "join_x_tolerance": 50,
-            "join_y_tolerance": 10,
+            "vertical_strategy": "text",
+            "horizontal_strategy": "lines",
+            "snap_x_tolerance": 5,
+            "snap_y_tolerance": 5,
+            "text_x_tolerance": 5,
         }
 
         try:
