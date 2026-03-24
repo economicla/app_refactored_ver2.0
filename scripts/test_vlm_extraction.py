@@ -1,11 +1,19 @@
 """
-VLM PDF Extraction — Tek sayfa test scripti.
+VLM PDF Extraction — Test scripti.
 
 Kullanım (sunucuda):
-    python -m scripts.test_vlm_extraction
 
-Veya doğrudan:
-    python scripts/test_vlm_extraction.py
+  # Doğrudan PDF dosyasından (otomatik sayfa görseline çevirir):
+    python scripts/test_vlm_extraction.py --pdf /path/to/rapor.pdf
+
+  # Tek sayfa test:
+    python scripts/test_vlm_extraction.py --pdf /path/to/rapor.pdf --page 1
+
+  # Hazır görsel klasöründen:
+    python scripts/test_vlm_extraction.py --images-dir /path/to/images/
+
+  # Tek bir görsel dosyasından:
+    python scripts/test_vlm_extraction.py --image /path/to/Page1.png
 """
 
 import asyncio
@@ -16,75 +24,112 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from structured_extractors.vlm_pdf_extractor import VLMPDFExtractor
 
-# ── Ayarlar ─────────────────────────────────────────────────────────
+# ── Varsayılan ayarlar (environment.env ile uyumlu) ─────────────────
 VLLM_HOST = "http://10.144.100.204"
 VLLM_PORT = 8814
 VLLM_MODEL = "RedHatAI/Qwen3-VL-32B-Instruct-NVFP4"
-
-IMAGES_DIR = Path(__file__).resolve().parent.parent / "PDF - images"
 # ────────────────────────────────────────────────────────────────────
 
 
-async def test_single_page(page_num: int = 1):
-    """Tek bir sayfa görüntüsünü VLM'e gönder ve çıktıyı göster."""
-    img_path = IMAGES_DIR / f"Page{page_num}.png"
-    if not img_path.exists():
-        print(f"❌ Görüntü bulunamadı: {img_path}")
-        return
+def build_extractor(args) -> VLMPDFExtractor:
+    return VLMPDFExtractor(
+        host=args.host,
+        port=args.port,
+        model=args.model,
+        max_concurrent=args.concurrent,
+    )
 
-    print(f"📤 Sayfa {page_num} gönderiliyor → {VLLM_MODEL}")
-    print(f"   Görüntü: {img_path} ({img_path.stat().st_size / 1024 / 1024:.1f} MB)")
+
+async def test_single_image(args, image_path: str, page_num: int = 1, total: int = 1):
+    p = Path(image_path)
+    if not p.exists():
+        print(f"❌ Görüntü bulunamadı: {p}")
+        return
+    print(f"📤 Sayfa {page_num} gönderiliyor → {args.model}")
+    print(f"   Görüntü: {p} ({p.stat().st_size / 1024 / 1024:.1f} MB)")
     print("-" * 60)
 
-    extractor = VLMPDFExtractor(
-        host=VLLM_HOST,
-        port=VLLM_PORT,
-        model=VLLM_MODEL,
-    )
-
-    result = await extractor.extract_single_page(
-        image_path=str(img_path),
-        page_num=page_num,
-        total_pages=13,
-    )
-
+    extractor = build_extractor(args)
+    result = await extractor.extract_single_page(str(p), page_num, total)
     print(result)
     print("-" * 60)
-    print(f"✅ Çıktı uzunluğu: {len(result)} karakter")
+    print(f"✅ Çıktı: {len(result)} karakter")
 
 
-async def test_all_pages():
-    """Tüm sayfa görüntülerini VLM ile oku."""
-    if not IMAGES_DIR.exists():
-        print(f"❌ Görüntü klasörü bulunamadı: {IMAGES_DIR}")
+async def test_from_pdf(args):
+    pdf = Path(args.pdf)
+    if not pdf.exists():
+        print(f"❌ PDF bulunamadı: {pdf}")
         return
 
-    extractor = VLMPDFExtractor(
-        host=VLLM_HOST,
-        port=VLLM_PORT,
-        model=VLLM_MODEL,
-        max_concurrent=2,
-    )
+    extractor = build_extractor(args)
 
-    result = await extractor.extract(
-        pdf_path="rapor.pdf",  # meta için kullanılır
-        image_folder=str(IMAGES_DIR),
-    )
+    if args.page > 0:
+        from structured_extractors.vlm_pdf_extractor import _pdf_to_images
+        print(f"📄 PDF → sayfa görselleri çıkarılıyor...")
+        images = _pdf_to_images(str(pdf))
+        total = len(images)
+        if args.page > total:
+            print(f"❌ Sayfa {args.page} yok (toplam {total} sayfa)")
+            return
+        img = images[args.page - 1]
+        await test_single_image(args, img, args.page, total)
+    else:
+        print(f"📄 Tüm sayfalar işleniyor: {pdf}")
+        result = await extractor.extract(str(pdf))
+        print(result["markdown"])
+        print("=" * 60)
+        meta = result["meta"]
+        print(f"✅ Toplam: {meta['pages']} sayfa, {len(result['markdown'])} karakter, {meta['errors']} hata")
+        if result["errors"]:
+            for e in result["errors"]:
+                print(f"   ⚠️ {e}")
 
-    print(result["markdown"])
-    print("=" * 60)
-    print(f"✅ Toplam: {result['meta']['pages']} sayfa, {len(result['markdown'])} karakter")
-    if result["errors"]:
-        print(f"⚠️ Hatalar: {result['errors']}")
+
+async def test_from_images_dir(args):
+    d = Path(args.images_dir)
+    if not d.exists():
+        print(f"❌ Klasör bulunamadı: {d}")
+        return
+
+    extractor = build_extractor(args)
+
+    if args.page > 0:
+        candidates = sorted(d.glob("Page*.png"), key=lambda p: int("".join(filter(str.isdigit, p.stem)) or 0))
+        if not candidates:
+            candidates = sorted(d.glob("page_*.png"), key=lambda p: int("".join(filter(str.isdigit, p.stem)) or 0))
+        if args.page > len(candidates):
+            print(f"❌ Sayfa {args.page} yok (toplam {len(candidates)} görsel)")
+            return
+        await test_single_image(args, str(candidates[args.page - 1]), args.page, len(candidates))
+    else:
+        result = await extractor.extract(pdf_path="rapor.pdf", image_folder=str(d))
+        print(result["markdown"])
+        print("=" * 60)
+        meta = result["meta"]
+        print(f"✅ Toplam: {meta['pages']} sayfa, {len(result['markdown'])} karakter, {meta['errors']} hata")
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="VLM PDF Extraction Test")
-    parser.add_argument("--page", type=int, default=0, help="Tek sayfa test (1-13). 0=tüm sayfalar.")
+
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--pdf", type=str, help="PDF dosya yolu")
+    source.add_argument("--images-dir", type=str, help="Sayfa görselleri klasörü")
+    source.add_argument("--image", type=str, help="Tek görsel dosyası")
+
+    parser.add_argument("--page", type=int, default=0, help="Tek sayfa test (1,2,...). 0=tüm sayfalar.")
+    parser.add_argument("--host", type=str, default=VLLM_HOST, help="vLLM host")
+    parser.add_argument("--port", type=int, default=VLLM_PORT, help="vLLM port")
+    parser.add_argument("--model", type=str, default=VLLM_MODEL, help="VLM model adı")
+    parser.add_argument("--concurrent", type=int, default=2, help="Eşzamanlı sayfa sayısı")
+
     args = parser.parse_args()
 
-    if args.page > 0:
-        asyncio.run(test_single_page(args.page))
-    else:
-        asyncio.run(test_all_pages())
+    if args.image:
+        asyncio.run(test_single_image(args, args.image))
+    elif args.pdf:
+        asyncio.run(test_from_pdf(args))
+    elif args.images_dir:
+        asyncio.run(test_from_images_dir(args))
