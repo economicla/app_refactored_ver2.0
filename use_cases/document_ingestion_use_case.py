@@ -115,7 +115,7 @@ class DocumentIngestionUseCase:
                 if self._is_credit_intelligence_pdf(file_path, filename):
                     if self.vlm_extractor:
                         logger.info("📑 İstihbarat Raporu detected → VLM extraction (Qwen3-VL)")
-                        return self._extract_pdf_vlm(file_path)
+                        return None  # VLM extraction handled async in execute()
                     logger.info("📑 İstihbarat Raporu detected → legacy structured extraction")
                     return self._extract_pdf_structured(file_path)
 
@@ -207,24 +207,9 @@ class DocumentIngestionUseCase:
         self._preprocess_as_markdown = True  # output is already markdown-style
         return text
 
-    def _extract_pdf_vlm(self, file_path: str) -> str:
+    async def _extract_pdf_vlm(self, file_path: str) -> str:
         """VLM (Qwen3-VL) ile PDF sayfalarını görüntü olarak okuyup markdown üret."""
-        import asyncio
-
-        async def _run():
-            return await self.vlm_extractor.extract(file_path)
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                result = pool.submit(asyncio.run, _run()).result()
-        else:
-            result = asyncio.run(_run())
+        result = await self.vlm_extractor.extract(file_path)
 
         self._structured_json = None
         errors = result.get("errors", [])
@@ -610,6 +595,9 @@ class DocumentIngestionUseCase:
             logger.info(f"📄 Extracting text from {Path(filename).suffix}...")
 
             text = self._extract_text(file_path, filename)
+
+            if text is None and self.vlm_extractor:
+                text = await self._extract_pdf_vlm(file_path)
 
             original_length = len(text)
 
