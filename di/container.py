@@ -24,6 +24,8 @@ from app_refactored.use_cases import (
     DocumentIngestionUseCase
 
 )
+
+from app_refactored.structured_extractors import VLMPDFExtractor
  
 logger = logging.getLogger(__name__)
  
@@ -127,6 +129,8 @@ class DIContainer:
         self._rag_use_case = None
 
         self._ingestion_use_case = None
+
+        self._vlm_extractor = None
  
     def get_embedding_service(self):
 
@@ -212,6 +216,28 @@ class DIContainer:
 
         return self._rag_use_case
  
+    def get_vlm_extractor(self) -> VLMPDFExtractor:
+
+        """Get VLMPDFExtractor — uses vLLM config (same host, VLM model)"""
+
+        if self._vlm_extractor is None:
+
+            logger.info("Initializing VLMPDFExtractor...")
+
+            self._vlm_extractor = VLMPDFExtractor(
+
+                host=self.config['vllm']['host'],
+
+                port=self.config['vllm']['port'],
+
+                model=self.config['vllm']['model'],
+
+                timeout=self.config['vllm']['timeout'],
+
+            )
+
+        return self._vlm_extractor
+
     def get_document_ingestion_use_case(self) -> DocumentIngestionUseCase:
 
         """Get DocumentIngestionUseCase with all dependencies injected"""
@@ -228,7 +254,9 @@ class DIContainer:
 
                 chunk_size=self.config['rag']['chunk_size'],
 
-                chunk_overlap=self.config['rag']['chunk_overlap']
+                chunk_overlap=self.config['rag']['chunk_overlap'],
+
+                vlm_extractor=self.get_vlm_extractor(),
 
             )
 
