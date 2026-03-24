@@ -15,9 +15,19 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import re
+
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _postprocess_markdown(text: str) -> str:
+    """VLM çıktısındaki bilinen artefaktları temizle."""
+    text = re.sub(r"<br\s*/?>", "\n", text)
+    text = re.sub(r"</?(?:span|div|p|font|b|i|u|em|strong)[^>]*>", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 SYSTEM_PROMPT = """\
@@ -29,11 +39,14 @@ KURALLAR:
 1. Sayfadaki tüm metin ve tabloları eksiksiz aktar.
 2. Bölüm başlıklarını `##` markdown başlığı olarak yaz.
 3. Tabloları **markdown tablo** formatında yaz (| başlık1 | başlık2 | ... |).
-4. Sayısal değerleri, tarihleri, banka adlarını **olduğu gibi** koru — yuvarlama veya tahmin yapma.
-5. Eğer sayfada grafik veya logo varsa, kısa bir açıklama yaz: `[Grafik: ...]`.
-6. Para birimi varsa (TL, TRY, USD, EUR) sayının yanına yaz.
-7. Boş veya anlamsız satırları atla.
-8. Çıktında yalnızca markdown olsun — açıklama, yorum veya ek bilgi ekleme.
+4. Birleşik (merged) tablo başlıkları varsa bunları düz sütun başlıklarına aç. \
+Örneğin "Ödendi" altında "Adet" ve "Tutar" varsa → "Ödendi Adet | Ödendi Tutar" yaz.
+5. Sayısal değerleri, tarihleri, banka adlarını **olduğu gibi** koru — yuvarlama veya tahmin yapma.
+6. Eğer sayfada grafik veya logo varsa, kısa bir açıklama yaz: `[Grafik: ...]`.
+7. Para birimi varsa (TL, TRY, USD, EUR) sayının yanına yaz.
+8. Boş veya anlamsız satırları atla.
+9. HTML tagları (<br>, <span> vb.) KULLANMA — sadece saf markdown yaz.
+10. Çıktında yalnızca markdown olsun — açıklama, yorum veya ek bilgi ekleme.
 """
 
 PAGE_PROMPT_TEMPLATE = """\
@@ -235,7 +248,7 @@ class VLMPDFExtractor:
                     {"role": "user", "content": user_content},
                 ],
                 "temperature": 0,
-                "max_tokens": 4096,
+                "max_tokens": 8192,
                 "top_p": 0.9,
                 "stream": False,
             }
@@ -245,6 +258,6 @@ class VLMPDFExtractor:
             response.raise_for_status()
             data = response.json()
             answer = data["choices"][0]["message"]["content"]
+            answer = _postprocess_markdown(answer)
             logger.info(f"📥 Sayfa {page_num} tamamlandı ({len(answer)} chars)")
             return answer
-
