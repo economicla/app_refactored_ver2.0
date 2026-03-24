@@ -3,15 +3,19 @@
 
 VLLMAdapter - vLLM'yi ILLMService interface'ine adapt et
 
-OpenAI-compatible API ile async communication
+OpenAI-compatible API ile async communication (text + vision)
 
 """
 
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List, Optional
+
+import base64
 
 import httpx
 
 import logging
+
+from pathlib import Path
 
 from app_refactored.core.interfaces import ILLMService
  
@@ -152,6 +156,55 @@ class VLLMAdapter(ILLMService):
 
             raise
  
+    async def generate_vision_response(
+        self,
+        prompt: str,
+        image_paths: List[str],
+        system_prompt: str = "",
+        temperature: float = 0,
+        max_tokens: int = 4096,
+        top_p: float = 0.9,
+    ) -> str:
+        """Send images + text prompt to a VLM (e.g. Qwen3-VL) and return the response."""
+        try:
+            content: list = []
+            for img_path in image_paths:
+                raw = Path(img_path).read_bytes()
+                b64 = base64.b64encode(raw).decode("utf-8")
+                suffix = Path(img_path).suffix.lower().lstrip(".")
+                mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(suffix, "image/png")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                })
+            content.append({"type": "text", "text": prompt})
+
+            messages = []
+            if system_prompt and system_prompt.strip():
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": content})
+
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "top_p": top_p,
+                "stream": False,
+            }
+
+            logger.info(f"🖼️ Vision request: {len(image_paths)} image(s), model={self.model}")
+            response = await self.client.post(self.completions_endpoint, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            answer = result["choices"][0]["message"]["content"]
+            logger.info(f"✅ Vision response ({len(answer)} chars)")
+            return answer
+
+        except Exception as e:
+            logger.error(f"❌ Vision response failed: {str(e)}")
+            raise
+
     async def stream_response(
 
         self,
