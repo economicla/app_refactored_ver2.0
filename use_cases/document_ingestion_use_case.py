@@ -14,7 +14,7 @@ from datetime import datetime
 
 from pathlib import Path
 
-from typing import List
+from typing import List, Optional
  
 from app_refactored.core.interfaces import (
 
@@ -40,6 +40,7 @@ from app_refactored.structured_extractors import CreditIntelligencePDFExtractor
 from app_refactored.structured_extractors.credit_intelligence_pdf_extractor import (
     render_structured_text,
 )
+from app_refactored.structured_extractors.vlm_pdf_extractor import VLMPDFExtractor
  
 logger = logging.getLogger(__name__)
  
@@ -65,7 +66,9 @@ class DocumentIngestionUseCase:
 
         chunk_size: int = 1000,
 
-        chunk_overlap: int = 200
+        chunk_overlap: int = 200,
+
+        vlm_extractor: Optional["VLMPDFExtractor"] = None,
 
     ):
 
@@ -92,6 +95,8 @@ class DocumentIngestionUseCase:
         self.chunk_size = chunk_size
 
         self.chunk_overlap = chunk_overlap
+
+        self.vlm_extractor = vlm_extractor
  
     def _extract_text(self, file_path: str, filename: str) -> str:
 
@@ -108,7 +113,10 @@ class DocumentIngestionUseCase:
 
             if file_type == '.pdf':
                 if self._is_credit_intelligence_pdf(file_path, filename):
-                    logger.info("📑 İstihbarat Raporu detected → structured extraction")
+                    if self.vlm_extractor:
+                        logger.info("📑 İstihbarat Raporu detected → VLM extraction (Qwen3-VL)")
+                        return self._extract_pdf_vlm(file_path)
+                    logger.info("📑 İstihbarat Raporu detected → legacy structured extraction")
                     return self._extract_pdf_structured(file_path)
 
                 return self._extract_pdf(file_path)
@@ -197,6 +205,40 @@ class DocumentIngestionUseCase:
                 [ln for ln in memzuc_lines if ln.startswith("MEMZUC_DOLULUK")],
             )
         self._preprocess_as_markdown = True  # output is already markdown-style
+        return text
+
+    def _extract_pdf_vlm(self, file_path: str) -> str:
+        """VLM (Qwen3-VL) ile PDF sayfalarını görüntü olarak okuyup markdown üret."""
+        import asyncio
+
+        async def _run():
+            return await self.vlm_extractor.extract(file_path)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                result = pool.submit(asyncio.run, _run()).result()
+        else:
+            result = asyncio.run(_run())
+
+        self._structured_json = None
+        errors = result.get("errors", [])
+        if errors:
+            for e in errors[:5]:
+                logger.warning(f"⚠️ VLM page error: {e}")
+
+        text = result["markdown"]
+        meta = result["meta"]
+        logger.info(
+            f"✅ VLM PDF extraction: {len(text)} chars, "
+            f"{meta['pages']} pages, {meta['errors']} errors"
+        )
+        self._preprocess_as_markdown = True
         return text
 
     def _extract_pdf(self, file_path: str) -> str:
