@@ -155,6 +155,21 @@ class HTMLStructuredConverter:
     # AKILLI TABLO PARSE (PCN-AWARE)
     # ================================================================
 
+    def _get_cell_text(self, cell: Tag) -> str:
+        """Extract text from a cell, preserving line breaks from <br> and block elements."""
+        text = cell.get_text(separator='\n')
+        lines = [line.strip() for line in text.split('\n')]
+        lines = [line for line in lines if line]
+        merged: List[str] = []
+        for line in lines:
+            if merged and re.match(r'^[.,]\d', line):
+                merged[-1] += line
+            elif merged and re.match(r'^[a-zA-Z]\)$', merged[-1]):
+                merged[-1] += ' ' + line
+            else:
+                merged.append(line)
+        return '\n'.join(merged)
+
     def _extract_row_values(self, tr: Tag) -> List[str]:
         """
         TR'den hücre değerlerini çıkar.
@@ -171,7 +186,7 @@ class HTMLStructuredConverter:
           → Bu metod: ["Label", "val1", "val2"]  (sanal hücreler)
         """
         cells = tr.find_all(["td", "th"], recursive=False)
-        texts = [c.get_text(strip=True) for c in cells]
+        texts = [self._get_cell_text(c) for c in cells]
 
         # 2+ gerçek hücre varsa → standart tablo, doğrudan dön
         if len(texts) >= 2:
@@ -306,44 +321,56 @@ class HTMLStructuredConverter:
                     lines.append(f"\n### {values[0].strip()}")
                 continue
 
-            label = values[0] if values else ""
-            parts: List[str] = []
+            label = values[0].replace('\n', ' ').strip() if values else ""
 
-            for i in range(1, len(headers)):
-                # PCN sütununu atla (değerlerle birleştirildi)
-                if i in pcn_indices:
-                    continue
-                if i >= len(values):
-                    continue
+            has_multiline = any('\n' in v for v in values[1:] if v)
 
-                value = values[i].strip()
-                if not value:
-                    continue
+            if has_multiline:
+                block = [f"\n### {label}"]
+                for i in range(1, len(headers)):
+                    if i in pcn_indices or i >= len(values):
+                        continue
+                    value = values[i].strip()
+                    if not value:
+                        continue
+                    header_name = headers[i]
+                    block.append(f"**{header_name}:**")
+                    block.append(value)
+                lines.append('\n'.join(block))
+            else:
+                parts: List[str] = []
+                for i in range(1, len(headers)):
+                    if i in pcn_indices:
+                        continue
+                    if i >= len(values):
+                        continue
 
-                header_name = headers[i]
+                    value = values[i].strip()
+                    if not value:
+                        continue
 
-                # PCN değerini al ve değere ekle
-                pcn = ""
-                if i in col_to_pcn:
-                    pcn_col = col_to_pcn[i]
-                    if pcn_col < len(values):
-                        pcn = values[pcn_col].strip()
+                    header_name = headers[i]
 
-                # Dönem + PCN birlikte
-                if i in period_cols:
-                    if pcn:
-                        parts.append(f"{period_cols[i]} döneminde {value} {pcn}")
+                    pcn = ""
+                    if i in col_to_pcn:
+                        pcn_col = col_to_pcn[i]
+                        if pcn_col < len(values):
+                            pcn = values[pcn_col].strip()
+
+                    if i in period_cols:
+                        if pcn:
+                            parts.append(f"{period_cols[i]} döneminde {value} {pcn}")
+                        else:
+                            parts.append(f"{period_cols[i]} döneminde {value}")
+                    elif pcn:
+                        parts.append(f"{header_name} {value} {pcn}")
                     else:
-                        parts.append(f"{period_cols[i]} döneminde {value}")
-                elif pcn:
-                    parts.append(f"{header_name} {value} {pcn}")
-                else:
-                    parts.append(f"{header_name}: {value}")
+                        parts.append(f"{header_name}: {value}")
 
-            if parts:
-                lines.append(f"{label}: {', '.join(parts)}")
-            elif label:
-                lines.append(label)
+                if parts:
+                    lines.append(f"{label}: {', '.join(parts)}")
+                elif label:
+                    lines.append(label)
 
         return "\n".join(lines)
 
@@ -490,11 +517,20 @@ class HTMLStructuredConverter:
                     if table_text:
                         section_lines.append(table_text)
 
-            # ── 2. Bu section'a ait div'leri parse et ──
-            own_divs = [
-                d for d in tbody.find_all("div")
-                if self._belongs_to_section(d, tbody)
-            ]
+            # ── 4. Bu section'a ait div'leri parse et (tablo içindekiler hariç) ──
+            inner_table_ids = set(id(t) for t in inner_tables) if tables_parsed else set()
+            own_divs = []
+            for d in tbody.find_all("div"):
+                if not self._belongs_to_section(d, tbody):
+                    continue
+                if inner_table_ids:
+                    inside_table = any(
+                        id(p) in inner_table_ids
+                        for p in d.parents if p.name == "table"
+                    )
+                    if inside_table:
+                        continue
+                own_divs.append(d)
 
             for div in own_divs:
                 div_text = div.get_text(strip=True)
