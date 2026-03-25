@@ -66,7 +66,13 @@ class DIContainer:
 
         chunk_size: int = 1000,
 
-        chunk_overlap: int = 200
+        chunk_overlap: int = 200,
+
+        # VLM (Vision model) — ayrı config
+        vlm_host: str = "",
+        vlm_port: int = 0,
+        vlm_model: str = "",
+        vlm_timeout: int = 600,
 
     ):
 
@@ -114,6 +120,13 @@ class DIContainer:
 
                 'chunk_overlap': chunk_overlap
 
+            },
+
+            'vlm': {
+                'host': vlm_host or vllm_host,
+                'port': vlm_port or vllm_port,
+                'model': vlm_model or vllm_model,
+                'timeout': vlm_timeout,
             }
 
         }
@@ -218,21 +231,26 @@ class DIContainer:
  
     def get_vlm_extractor(self) -> VLMPDFExtractor:
 
-        """Get VLMPDFExtractor — uses vLLM config (same host, VLM model)"""
+        """Get VLMPDFExtractor — uses separate VLM config (vision model)"""
 
         if self._vlm_extractor is None:
 
-            logger.info("Initializing VLMPDFExtractor...")
+            vlm_cfg = self.config['vlm']
+
+            logger.info(
+                f"Initializing VLMPDFExtractor: {vlm_cfg['host']}:{vlm_cfg['port']}, "
+                f"model={vlm_cfg['model']}"
+            )
 
             self._vlm_extractor = VLMPDFExtractor(
 
-                host=self.config['vllm']['host'],
+                host=vlm_cfg['host'],
 
-                port=self.config['vllm']['port'],
+                port=vlm_cfg['port'],
 
-                model=self.config['vllm']['model'],
+                model=vlm_cfg['model'],
 
-                timeout=self.config['vllm']['timeout'],
+                timeout=vlm_cfg['timeout'],
 
             )
 
