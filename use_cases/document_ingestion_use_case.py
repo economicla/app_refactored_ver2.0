@@ -112,13 +112,18 @@ class DocumentIngestionUseCase:
         try:
 
             if file_type == '.pdf':
-                if self._is_credit_intelligence_pdf(file_path, filename):
+                is_intel = self._is_credit_intelligence_pdf(file_path, filename)
+                print(f"[DEBUG] PDF detection: is_credit_intelligence={is_intel}, vlm_extractor={'YES' if self.vlm_extractor else 'NO'}")
+                if is_intel:
                     if self.vlm_extractor:
+                        print("[DEBUG] → VLM extraction path selected")
                         logger.info("📑 İstihbarat Raporu detected → VLM extraction (Qwen3-VL)")
                         return None  # VLM extraction handled async in execute()
+                    print("[DEBUG] → Legacy structured extraction path selected")
                     logger.info("📑 İstihbarat Raporu detected → legacy structured extraction")
                     return self._extract_pdf_structured(file_path)
 
+                print("[DEBUG] → Generic PDF extraction path selected")
                 return self._extract_pdf(file_path)
 
             elif file_type == '.docx':
@@ -597,9 +602,15 @@ class DocumentIngestionUseCase:
             text = self._extract_text(file_path, filename)
 
             if text is None and self.vlm_extractor:
+                print(f"[DEBUG] _extract_text returned None → calling VLM extraction for {file_path}")
                 text = await self._extract_pdf_vlm(file_path)
+                print(f"[DEBUG] VLM extraction returned {len(text)} chars")
+
+            if text is None:
+                raise ValueError("Text extraction returned None — both sync and VLM paths failed")
 
             original_length = len(text)
+            print(f"[DEBUG] Final text length: {original_length} chars")
 
             logger.info("🧹 Preprocessing text...")
             preprocessor = DocumentPreprocessor()
