@@ -2,12 +2,13 @@
 Veritabanındaki chunk'ları kontrol et.
 
 Kullanım:
-    python scripts/debug_chunks.py                         # Tüm dokümanları listele
-    python scripts/debug_chunks.py --filename yeni-istihbarat-raporu.pdf  # Belirli dosyanın chunk'ları
-    python scripts/debug_chunks.py --filename yeni-istihbarat-raporu.pdf --content  # İçeriklerle birlikte
+    python scripts/debug_chunks.py
+    python scripts/debug_chunks.py --filename yeni-istihbarat-raporu.pdf
+    python scripts/debug_chunks.py --filename yeni-istihbarat-raporu.pdf --content
 """
 
 import asyncio
+import json as _json
 import os
 import sys
 from pathlib import Path
@@ -36,13 +37,13 @@ async def main(filename: str = None, show_content: bool = False):
         rows = await conn.fetch(
             "SELECT id, chunk_index, length(content) as content_len, "
             "left(content, 300) as preview, doc_metadata "
-            "FROM document_chunks WHERE filename = $1 ORDER BY chunk_index",
+            "FROM documents WHERE filename = $1 AND deleted_at IS NULL "
+            "ORDER BY chunk_index",
             filename,
         )
         print(f"\n📄 {filename}: {len(rows)} chunk(s)\n")
         total_chars = 0
         for r in rows:
-            import json as _json
             meta = r["doc_metadata"]
             if isinstance(meta, str):
                 meta = _json.loads(meta)
@@ -52,13 +53,14 @@ async def main(filename: str = None, show_content: bool = False):
             total_chars += r["content_len"]
             print(f"  Chunk {r['chunk_index']:3d} | {r['content_len']:6d} chars | type: {doc_type} | header: {str(header)[:60]}")
             if show_content:
-                print(f"    preview: {r['preview'][:200]}")
+                print(f"    preview: {r['preview'][:250]}")
                 print()
         print(f"\n  TOPLAM: {total_chars} karakter, {len(rows)} chunk")
     else:
         rows = await conn.fetch(
             "SELECT filename, count(*) as chunks, sum(length(content)) as total_chars "
-            "FROM document_chunks GROUP BY filename ORDER BY filename"
+            "FROM documents WHERE deleted_at IS NULL "
+            "GROUP BY filename ORDER BY filename"
         )
         print(f"\n📚 {len(rows)} doküman:\n")
         for r in rows:
