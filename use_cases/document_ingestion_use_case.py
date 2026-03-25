@@ -36,10 +36,6 @@ from .document_preprocessing import DocumentPreprocessor
 from .intelligent_chunking import IntelligentChunker
 from .html_structured_converter import HTMLStructuredConverter
 
-from app_refactored.structured_extractors import CreditIntelligencePDFExtractor
-from app_refactored.structured_extractors.credit_intelligence_pdf_extractor import (
-    render_structured_text,
-)
 from app_refactored.structured_extractors.vlm_pdf_extractor import VLMPDFExtractor
  
 logger = logging.getLogger(__name__)
@@ -114,14 +110,10 @@ class DocumentIngestionUseCase:
             if file_type == '.pdf':
                 is_intel = self._is_credit_intelligence_pdf(file_path, filename)
                 print(f"[DEBUG] PDF detection: is_credit_intelligence={is_intel}, vlm_extractor={'YES' if self.vlm_extractor else 'NO'}")
-                if is_intel:
-                    if self.vlm_extractor:
-                        print("[DEBUG] → VLM extraction path selected")
-                        logger.info("📑 İstihbarat Raporu detected → VLM extraction (Qwen3-VL)")
-                        return None  # VLM extraction handled async in execute()
-                    print("[DEBUG] → Legacy structured extraction path selected")
-                    logger.info("📑 İstihbarat Raporu detected → legacy structured extraction")
-                    return self._extract_pdf_structured(file_path)
+                if is_intel and self.vlm_extractor:
+                    print("[DEBUG] → VLM extraction path selected")
+                    logger.info("📑 İstihbarat Raporu detected → VLM extraction (Qwen3-VL)")
+                    return None  # VLM extraction handled async in execute()
 
                 print("[DEBUG] → Generic PDF extraction path selected")
                 return self._extract_pdf(file_path)
@@ -174,43 +166,6 @@ class DocumentIngestionUseCase:
             pass
         return False
 
-    def _extract_pdf_structured(self, file_path: str) -> str:
-        """
-        Structured extraction for İstihbarat Raporu PDFs.
-        Returns controlled text via render_structured_text().
-        Also stores the raw JSON in self._structured_json for metadata use.
-        """
-        extractor = CreditIntelligencePDFExtractor()
-        data = extractor.extract(file_path)
-        self._structured_json = data
-
-        warnings = data.get("debug", {}).get("warnings", [])
-        if warnings:
-            for w in warnings[:10]:
-                logger.warning(f"⚠️ Structured PDF: {w}")
-
-        text = render_structured_text(data)
-        logger.info(
-            f"✅ Structured PDF extraction: {len(text)} chars, "
-            f"{data['meta']['pages']} pages, "
-            f"{len(data.get('debug', {}).get('section_hits', []))} sections detected"
-        )
-        # Memzuc doluluk debug: ingest logunda görünsün (sorun giderme için)
-        debug = data.get("debug", {})
-        if debug.get("memzuc_words_parser"):
-            logger.info(
-                "📊 Memzuc doluluk (extractor debug): %s",
-                debug.get("memzuc_words_parser"),
-            )
-        memzuc_lines = (data.get("sections") or {}).get("memzuc_doluluk_fallback") or []
-        if memzuc_lines:
-            logger.info(
-                "📊 Memzuc doluluk satırları (%s): %s",
-                len(memzuc_lines),
-                [ln for ln in memzuc_lines if ln.startswith("MEMZUC_DOLULUK")],
-            )
-        self._preprocess_as_markdown = True  # output is already markdown-style
-        return text
 
     async def _extract_pdf_vlm(self, file_path: str) -> str:
         """VLM (Qwen3-VL) ile PDF sayfalarını görüntü olarak okuyup markdown üret."""
