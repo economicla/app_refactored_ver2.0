@@ -21,6 +21,12 @@ from app_refactored.infra.redis_client import redis_client
 # Load environment variables from environment.env file
 
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler()],
+)
+
 env_path = Path(__file__).parent / "environment.env"
 
 load_dotenv(dotenv_path=str(env_path))
