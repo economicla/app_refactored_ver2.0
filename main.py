@@ -99,6 +99,12 @@ def load_configuration() -> dict:
         "vllm_model": os.getenv("VLLM_MODEL", "openai/gpt-oss-120b"),
         "vllm_timeout": get_env_int("VLLM_TIMEOUT", 300),
         
+        # VLM Configuration (Vision-Language Model — PDF extraction)
+        "vlm_host": os.getenv("VLM_HOST", os.getenv("VLLM_HOST", "http://10.144.100.204")),
+        "vlm_port": get_env_int("VLM_PORT", 8814),
+        "vlm_model": os.getenv("VLM_MODEL", "RedHatAI/Qwen3-VL-32B-Instruct-NVFP4"),
+        "vlm_timeout": get_env_int("VLM_TIMEOUT", 600),
+
         # RAG Configuration
         "chunk_size": get_env_int("RAG_CHUNK_SIZE", 1000),
         "chunk_overlap": get_env_int("RAG_CHUNK_OVERLAP", 200),
@@ -125,6 +131,14 @@ def load_configuration() -> dict:
     }
     
     logger.info("✅ Configuration loaded successfully")
+    logger.info(
+        f"📌 VLM config: host={config['vlm_host']}, port={config['vlm_port']}, "
+        f"model={config['vlm_model']}"
+    )
+    logger.info(
+        f"📌 vLLM config: host={config['vllm_host']}, port={config['vllm_port']}, "
+        f"model={config['vllm_model']}"
+    )
     return config
 
 
@@ -171,7 +185,13 @@ async def init_di_container():
             
             # RAG Configuration
             chunk_size=CONFIG['chunk_size'],
-            chunk_overlap=CONFIG['chunk_overlap']
+            chunk_overlap=CONFIG['chunk_overlap'],
+
+            # VLM Configuration (Vision model for PDF extraction)
+            vlm_host=CONFIG['vlm_host'],
+            vlm_port=CONFIG['vlm_port'],
+            vlm_model=CONFIG['vlm_model'],
+            vlm_timeout=CONFIG['vlm_timeout'],
         )
         
         # Set DI Container in routes
