@@ -113,9 +113,9 @@ class VLMPDFExtractor:
         host: str,
         port: int,
         model: str,
-        timeout: int = 300,
-        max_concurrent: int = 3,
-        dpi: int = 200,
+        timeout: int = 600,
+        max_concurrent: int = 1,
+        dpi: int = 150,
     ):
         self.host = host
         self.port = port
@@ -225,10 +225,14 @@ class VLMPDFExtractor:
     ) -> str:
         """Send one page image to the VLM and return markdown."""
         async with semaphore:
-            raw = Path(image_path).read_bytes()
+            img_file = Path(image_path)
+            raw = img_file.read_bytes()
+            img_size_kb = len(raw) / 1024
             b64 = base64.b64encode(raw).decode("utf-8")
-            suffix = Path(image_path).suffix.lower().lstrip(".")
+            suffix = img_file.suffix.lower().lstrip(".")
             mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(suffix, "image/png")
+
+            print(f"[VLM] Sayfa {page_num}/{total_pages}: {img_file.name}, {img_size_kb:.0f} KB, b64 len={len(b64)}")
 
             user_content = [
                 {
@@ -253,11 +257,17 @@ class VLMPDFExtractor:
                 "stream": False,
             }
 
-            logger.info(f"📤 Sayfa {page_num}/{total_pages} VLM'e gönderiliyor...")
+            print(f"[VLM] Sayfa {page_num}: POST → {self.api_url} (payload ~{len(str(payload)) / 1024 / 1024:.1f} MB)")
             response = await client.post(self.api_url, json=payload)
             response.raise_for_status()
             data = response.json()
             answer = data["choices"][0]["message"]["content"]
             answer = _postprocess_markdown(answer)
-            logger.info(f"📥 Sayfa {page_num} tamamlandı ({len(answer)} chars)")
+
+            is_refusal = any(kw in answer[:100] for kw in ["erişemiyorum", "görüntüsünü paylaş", "Lütfen sayfa"])
+            if is_refusal:
+                print(f"[VLM] ⚠️ Sayfa {page_num}: Model görüntüyü göremedi! İlk 100 char: {answer[:100]}")
+            else:
+                print(f"[VLM] ✅ Sayfa {page_num}: {len(answer)} chars")
+
             return answer
