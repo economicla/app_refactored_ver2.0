@@ -35,19 +35,26 @@ async def main(filename: str = None, show_content: bool = False):
     if filename:
         rows = await conn.fetch(
             "SELECT id, chunk_index, length(content) as content_len, "
-            "left(content, 200) as preview, metadata "
+            "left(content, 300) as preview, doc_metadata "
             "FROM document_chunks WHERE filename = $1 ORDER BY chunk_index",
             filename,
         )
         print(f"\n📄 {filename}: {len(rows)} chunk(s)\n")
+        total_chars = 0
         for r in rows:
-            meta = r["metadata"] or {}
-            doc_type = meta.get("doc_type", "?") if isinstance(meta, dict) else "?"
-            header = meta.get("header", "") if isinstance(meta, dict) else ""
-            print(f"  Chunk {r['chunk_index']:3d} | {r['content_len']:6d} chars | header: {header[:60]}")
+            import json as _json
+            meta = r["doc_metadata"]
+            if isinstance(meta, str):
+                meta = _json.loads(meta)
+            meta = meta or {}
+            doc_type = meta.get("doc_type", "?")
+            header = meta.get("header", "")
+            total_chars += r["content_len"]
+            print(f"  Chunk {r['chunk_index']:3d} | {r['content_len']:6d} chars | type: {doc_type} | header: {str(header)[:60]}")
             if show_content:
-                print(f"    preview: {r['preview'][:150]}...")
-            print()
+                print(f"    preview: {r['preview'][:200]}")
+                print()
+        print(f"\n  TOPLAM: {total_chars} karakter, {len(rows)} chunk")
     else:
         rows = await conn.fetch(
             "SELECT filename, count(*) as chunks, sum(length(content)) as total_chars "
