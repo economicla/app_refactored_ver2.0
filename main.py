@@ -6,13 +6,16 @@ Production-Grade Banking System Implementation
 
 import logging
 import os
+import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app_refactored.di import DIContainer
 from app_refactored.web_api import router, set_di_container
@@ -100,7 +103,7 @@ def load_configuration() -> dict:
         "vllm_timeout": get_env_int("VLLM_TIMEOUT", 300),
         
         # VLM Configuration (Vision-Language Model — PDF extraction)
-        "vlm_host": os.getenv("VLM_HOST", os.getenv("VLLM_HOST", "http://vllm-redhatai-qwen3-vl-32b-instruct-nvfp4.aiops.albarakaturk.local")),
+        "vlm_host": os.getenv("VLM_HOST", "http://vllm-redhatai-qwen3-vl-32b-instruct-nvfp4.aiops.albarakaturk.local"),
         "vlm_port": get_env_int("VLM_PORT", 0),
         "vlm_model": os.getenv("VLM_MODEL", "redhatai-qwen3-vl-32b-instruct-nvfp4"),
         "vlm_timeout": get_env_int("VLM_TIMEOUT", 600),
@@ -245,6 +248,62 @@ async def shutdown_redis():
         logger.error(f"❌ Error during Redis shutdown: {str(e)}")
 
 
+async def _probe_dependencies():
+    """Startup sırasında tüm dış servislere bağlantı kontrolü yap."""
+    global _container
+    if not _container:
+        return
+
+    logger.info("🔍 Dependency health probes starting...")
+    checks = {}
+
+    # PostgreSQL
+    try:
+        repo = _container.get_document_repository()
+        count = await repo.count()
+        checks["PostgreSQL"] = f"✅ connected ({count} docs)"
+    except Exception as e:
+        checks["PostgreSQL"] = f"❌ {type(e).__name__}: {e}"
+
+    # Jina Embeddings
+    try:
+        emb = _container.get_embedding_service()
+        ok = await emb.is_available()
+        checks["Jina Embeddings"] = "✅ available" if ok else "⚠️ not responding"
+    except Exception as e:
+        checks["Jina Embeddings"] = f"❌ {type(e).__name__}: {e}"
+
+    # vLLM (text model)
+    try:
+        llm = _container.get_llm_service()
+        ok = await llm.is_available()
+        checks["vLLM (text)"] = f"✅ available (model={_container.config['vllm']['model']})" if ok else "⚠️ not responding"
+    except Exception as e:
+        checks["vLLM (text)"] = f"❌ {type(e).__name__}: {e}"
+
+    # VLM (vision model)
+    try:
+        import httpx as _httpx
+        vlm_cfg = _container.config['vlm']
+        base = f"{vlm_cfg['host']}:{vlm_cfg['port']}" if vlm_cfg['port'] else vlm_cfg['host']
+        async with _httpx.AsyncClient(timeout=_httpx.Timeout(10)) as c:
+            r = await c.get(f"{base}/v1/models")
+            r.raise_for_status()
+            models = [m["id"] for m in r.json().get("data", [])]
+            checks["VLM (vision)"] = f"✅ available (models={models})"
+    except Exception as e:
+        checks["VLM (vision)"] = f"❌ {type(e).__name__}: {e}"
+
+    for svc, status in checks.items():
+        logger.info(f"  {svc}: {status}")
+
+    failed = [k for k, v in checks.items() if v.startswith("❌")]
+    if failed:
+        logger.warning(f"⚠️ {len(failed)} dependency check(s) failed: {', '.join(failed)}")
+    else:
+        logger.info("✅ All dependencies healthy")
+
+
 # ============================================================================
 # FastAPI Lifespan Management
 # ============================================================================
@@ -264,18 +323,17 @@ async def lifespan(app: FastAPI):
         # Initialize DI Container
         await init_di_container()
 
-        #Veritabanı tablolarını otomatik oluştur/kontrol et
+        # Veritabanı tablolarını oluştur/kontrol et
         global _container
         if _container:
             repository = _container.get_document_repository()
             if hasattr(repository, 'create_tables'):
                 logger.info("📊 Veritabanı tabloları kontrol ediliyor...")
                 await repository.create_tables()
-        
-        # Initialize Redis
-        #if CONFIG['rate_limit_enabled']:
-        #    await init_redis()
-        
+
+        # Dependency health probes
+        await _probe_dependencies()
+
         logger.info("✅ Application startup complete")
         
     except Exception as e:
@@ -316,6 +374,33 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json"
 )
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Her isteği request_id, method, path ve süre ile logla."""
+
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:8])
+        request.state.request_id = request_id
+        t0 = time.monotonic()
+
+        response = await call_next(request)
+
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        status = response.status_code
+        level = logging.WARNING if status >= 400 else logging.INFO
+        # /health ve / gibi sık çağrılan endpoint'leri DEBUG seviyesinde logla
+        path = request.url.path
+        if path in ("/", "/health", "/api/v2/health"):
+            level = logging.DEBUG
+        logger.log(
+            level,
+            f"[{request_id}] {request.method} {path} → {status} ({elapsed_ms:.0f}ms)"
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
+app.add_middleware(RequestLoggingMiddleware)
 
 # CORS Middleware
 cors_origins = CONFIG['cors_origins']
