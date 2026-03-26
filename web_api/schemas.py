@@ -187,8 +187,10 @@ class HealthCheckResponse(BaseModel):
 
     vllm_available: bool
 
+    vlm_available: bool = Field(default=False)
+
     timestamp: datetime
- 
+
     class Config:
 
         example = {
@@ -200,6 +202,8 @@ class HealthCheckResponse(BaseModel):
             "postgres_available": True,
 
             "vllm_available": True,
+
+            "vlm_available": True,
 
             "timestamp": "2026-02-06T12:00:00"
 
