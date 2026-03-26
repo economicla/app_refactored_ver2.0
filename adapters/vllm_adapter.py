@@ -60,7 +60,7 @@ class VLLMAdapter(ILLMService):
 
         """
 
-        self.host = host
+        self.host = host.rstrip("/")
 
         self.port = port
 
@@ -68,7 +68,7 @@ class VLLMAdapter(ILLMService):
 
         self.timeout = timeout
 
-        self.api_base = f"{host}:{port}/v1"
+        self.api_base = f"{self.host}:{port}/v1" if port else f"{self.host}/v1"
 
         self.completions_endpoint = f"{self.api_base}/chat/completions"
 
