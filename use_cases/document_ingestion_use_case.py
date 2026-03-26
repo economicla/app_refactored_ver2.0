@@ -9,6 +9,7 @@ Desteklenen formatlar: PDF (istihbarat raporu: markdown tabanlı extraction), DO
 """
 
 import logging
+import time
 
 from datetime import datetime
 
@@ -109,13 +110,12 @@ class DocumentIngestionUseCase:
 
             if file_type == '.pdf':
                 is_intel = self._is_credit_intelligence_pdf(file_path, filename)
-                print(f"[DEBUG] PDF detection: is_credit_intelligence={is_intel}, vlm_extractor={'YES' if self.vlm_extractor else 'NO'}")
+                logger.debug(f"PDF detection: is_credit_intelligence={is_intel}, vlm_extractor={'YES' if self.vlm_extractor else 'NO'}")
                 if is_intel and self.vlm_extractor:
-                    print("[DEBUG] → VLM extraction path selected")
                     logger.info("📑 İstihbarat Raporu detected → VLM extraction (Qwen3-VL)")
                     return None  # VLM extraction handled async in execute()
 
-                print("[DEBUG] → Generic PDF extraction path selected")
+                logger.debug("Generic PDF extraction path selected")
                 return self._extract_pdf(file_path)
 
             elif file_type == '.docx':
@@ -162,8 +162,8 @@ class DocumentIngestionUseCase:
                                "limit risk bilgi", "kredi istihbarat")
                     if sum(1 for s in signals if s in text) >= 2:
                         return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"⚠️ PDF intelligence detection failed (treating as generic): {type(e).__name__}: {e}")
         return False
 
 
@@ -540,6 +540,7 @@ class DocumentIngestionUseCase:
 
         try:
 
+            pipeline_start = time.monotonic()
             logger.info(f"📥 Ingesting: {filename}")
 
             # Step 0: Aynı dosyanın eski chunk'larını temizle (re-upload desteği)
@@ -549,28 +550,29 @@ class DocumentIngestionUseCase:
                     logger.info(f"🗑️ Deleted {deleted_count} old chunks for {filename}")
             except Exception as del_err:
                 logger.warning(f"⚠️ Old chunk cleanup failed (continuing): {del_err}")
- 
-            # Step 1: Metni çıkart
 
-            logger.info(f"📄 Extracting text from {Path(filename).suffix}...")
+            # Step 1: Metni çıkart
+            t0 = time.monotonic()
+            logger.info(f"📄 [1/5] Extracting text from {Path(filename).suffix}...")
 
             text = self._extract_text(file_path, filename)
 
             if text is None and self.vlm_extractor:
-                print(f"[DEBUG] _extract_text returned None → calling VLM extraction for {file_path}")
+                logger.info(f"📑 Sync extraction returned None → VLM extraction for {Path(filename).name}")
                 text = await self._extract_pdf_vlm(file_path)
-                print(f"[DEBUG] VLM extraction returned {len(text)} chars")
 
             if text is None:
                 raise ValueError("Text extraction returned None — both sync and VLM paths failed")
 
             original_length = len(text)
-            print(f"[DEBUG] Final text length: {original_length} chars")
+            extract_ms = (time.monotonic() - t0) * 1000
+            logger.info(f"📏 [1/5] Extraction done: {original_length:,} chars in {extract_ms:.0f}ms")
 
-            logger.info("🧹 Preprocessing text...")
+            # Step 2: Preprocessing
+            t0 = time.monotonic()
+            logger.info("🧹 [2/5] Preprocessing text...")
             preprocessor = DocumentPreprocessor()
             raw_type = Path(filename).suffix.lstrip('.')
-            # HTML / structured PDF zaten markdown; "md" ile sadece clean çalışır
             preprocess_type = "md" if (
                 raw_type in ("html", "htm") or getattr(self, "_preprocess_as_markdown", False)
             ) else raw_type
@@ -578,10 +580,12 @@ class DocumentIngestionUseCase:
                 text,
                 file_type=preprocess_type
             )
- 
-            # Step 2: Chunk'la
+            preprocess_ms = (time.monotonic() - t0) * 1000
+            logger.info(f"🧹 [2/5] Preprocessing done: {len(text):,} chars in {preprocess_ms:.0f}ms")
 
-            logger.info("✂️ Intelligent chunking...")
+            # Step 3: Chunk'la
+            t0 = time.monotonic()
+            logger.info("✂️ [3/5] Intelligent chunking...")
 
             chunker = IntelligentChunker(chunk_size=1000, chunk_overlap=200)
             chunk_objects = chunker.chunk(text)
@@ -589,7 +593,6 @@ class DocumentIngestionUseCase:
             doc_label = filename.rsplit(".", 1)[0].replace("-", " ").replace("_", " ").title()
             doc_type = self._detect_document_type(filename, text)
             is_dictionary = self._is_dictionary_doc(filename, text)
-            logger.info(f"📑 Doküman türü: {doc_type}, Sözlük: {is_dictionary}")
             enriched: list[str] = []
             for idx, c in enumerate(chunks):
                 header = chunk_objects[idx].get("header", "")
@@ -598,20 +601,27 @@ class DocumentIngestionUseCase:
                     prefix += f"\n[Bölüm: {header}]"
                 enriched.append(f"{prefix}\n\n{c}")
             chunks = enriched
- 
-            # Step 3: Embedding'ler oluştur
+            chunk_ms = (time.monotonic() - t0) * 1000
+            logger.info(
+                f"✂️ [3/5] Chunking done: {len(chunks)} chunks in {chunk_ms:.0f}ms "
+                f"(type={doc_type}, dictionary={is_dictionary})"
+            )
 
-            logger.info("📊 Generating embeddings...")
+            # Step 4: Embedding'ler oluştur
+            t0 = time.monotonic()
+            logger.info(f"📊 [4/5] Generating embeddings for {len(chunks)} chunks...")
 
             embeddings = await self.embedding_service.embed_batch(chunks)
- 
+
             if len(embeddings) != len(chunks):
-
                 raise Exception(f"Embedding count mismatch: {len(embeddings)} vs {len(chunks)}")
- 
-            # Step 4: Veritabanına kaydet
 
-            logger.info("💾 Saving to database...")
+            embed_ms = (time.monotonic() - t0) * 1000
+            logger.info(f"📊 [4/5] Embeddings done: {len(embeddings)} vectors in {embed_ms:.0f}ms")
+
+            # Step 5: Veritabanına kaydet
+            t0 = time.monotonic()
+            logger.info(f"💾 [5/5] Saving {len(chunks)} chunks to database...")
 
             sections = (self._structured_json or {}).get("sections") or {}
             bi_list = sections.get("banka_istihbarati")
@@ -646,14 +656,19 @@ class DocumentIngestionUseCase:
                         metadata=meta,
                     )
                 )
- 
-            saved_docs = await self.document_repository.save_batch(documents)
- 
-            # Token sayısı (rough estimate: 1 token ≈ 4 chars)
 
+            saved_docs = await self.document_repository.save_batch(documents)
+            save_ms = (time.monotonic() - t0) * 1000
             total_tokens = original_length // 4
- 
-            logger.info(f"✅ Ingestion completed: {len(saved_docs)} chunks, {total_tokens} tokens")
+            pipeline_ms = (time.monotonic() - pipeline_start) * 1000
+
+            logger.info(
+                f"✅ Ingestion completed: {filename} | "
+                f"{len(saved_docs)} chunks, ~{total_tokens:,} tokens | "
+                f"total={pipeline_ms:.0f}ms "
+                f"(extract={extract_ms:.0f}, preprocess={preprocess_ms:.0f}, "
+                f"chunk={chunk_ms:.0f}, embed={embed_ms:.0f}, save={save_ms:.0f})"
+            )
  
             return DocumentIngestionResult(
 
