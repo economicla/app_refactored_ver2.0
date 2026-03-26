@@ -242,41 +242,39 @@ async def health_check(container: DIContainer = Depends(get_di_container)):
     """Sistem sağlığını kontrol et"""
 
     try:
-
         jina_ok = await container.get_embedding_service().is_available()
-
         vllm_ok = await container.get_llm_service().is_available()
 
-        # PostgreSQL kontrol etmek için basit bir count query
-
         postgres_ok = True
-
         try:
-
             await container.get_document_repository().count()
-
-        except:
-
+        except Exception as db_err:
+            logger.warning(f"Health check: PostgreSQL probe failed: {db_err}")
             postgres_ok = False
 
+        vlm_ok = False
+        try:
+            import httpx as _httpx
+            vlm_cfg = container.config['vlm']
+            base = f"{vlm_cfg['host']}:{vlm_cfg['port']}" if vlm_cfg['port'] else vlm_cfg['host']
+            async with _httpx.AsyncClient(timeout=_httpx.Timeout(5)) as c:
+                r = await c.get(f"{base}/v1/models")
+                vlm_ok = r.status_code == 200
+        except Exception as vlm_err:
+            logger.warning(f"Health check: VLM probe failed: {vlm_err}")
+
+        all_ok = jina_ok and vllm_ok and postgres_ok and vlm_ok
         return HealthCheckResponse(
-
-            status="healthy" if (jina_ok and vllm_ok and postgres_ok) else "degraded",
-
+            status="healthy" if all_ok else "degraded",
             jina_available=jina_ok,
-
             postgres_available=postgres_ok,
-
             vllm_available=vllm_ok,
-
+            vlm_available=vlm_ok,
             timestamp=datetime.now()
-
         )
 
     except Exception as e:
-
         logger.error(f"Health check failed: {str(e)}")
-
         raise HTTPException(status_code=500, detail=str(e))
  
  
