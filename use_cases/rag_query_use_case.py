@@ -118,6 +118,14 @@ TEMEL KURALLAR:
 10. Dönemler arası karşılaştırma istendiğinde, değerleri tablo veya liste halinde sun
 11. Soruda geçen dönem kontekstte yoksa, "Bilgi mevcut değil" YAZMA, bunun yerine kontekstteki mevcut dönemleri belirt ve o dönemlerin verilerini sun. Örneğin: "Soruda belirtilen 2024/6 dönemi verilerde bulunmamaktadır. Mevcut dönemler: 2023/12, 2024/12, 2025/6. Bu dönemlere ait veriler şöyledir: ..."
 
+CEVAP FORMAT KURALLARI:
+- Limit, teminat, risk gibi KARŞILAŞTIRMALI veriler sorulduğunda MUTLAKA markdown tablo kullan (| Başlık1 | Başlık2 | ... |)
+- Mevcut vs Önerilen karşılaştırmaları için iki sütunlu tablo kullan: | Limit Türü | Mevcut | Önerilen |
+- Firma bazlı veriler için satır başına bir firma yaz
+- Alt kalemleri (a, b, c gibi) tablonun altında madde listesi olarak ekle
+- Tek satırlık bilgiler için tablo gereksiz — düz metin yeterli
+- Uzun listeler yerine özet tablo + detay maddeleri tercih et
+
 BANKA İSTİHBARATI VE LİMİT RİSK TABLOLARI:
 - "Banka istihbaratına göre", "diğer bankalarda limit/risk" gibi sorularda kontekstteki TÜM kaynakları (Kaynak 1, 2, 3...) tara. Sadece "Banka: ... | Firma: ... | Genel Limit: [sayı] | Nakit Risk: [sayı]" biçiminde tam sayısal limit ve risk verisi olan satırları cevap tablosuna ekle. Limit veya risk sayısı olmayan, Özet İstihbarat veya başka bölümlerdeki eksik satırları tabloya ekleme. Aynı banka farklı firmada (Kuveyt Türk–AKTÜL KAĞIT, Kuveyt Türk–MKS MARMARA, Türkiye Finans–AKTÜL KAĞIT, Türkiye Finans–MKS MARMARA) tam veriyle geçiyorsa hepsini ayrı satırda ver. Banka adlarını K1, K2 ile değiştirme.
 - "Limit Risk Bilgileri (Bin TL)" veya "Kaynak Bazında Detay" tablolarından veri kullanacaksan: Ya tablonun TAMAMINI başlıkla ver, ya da hiç alma. Kısmen gösterme.
