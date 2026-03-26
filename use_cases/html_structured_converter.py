@@ -48,7 +48,7 @@ class HTMLStructuredConverter:
         "CommitteeName": "KOMİTE ADI",
         "Limits": "LİMİT BİLGİLERİ",
         "RatingValues": "RATING DEĞERLERİ",
-        "CautionConditions": "TEMİNAT KOŞULLARI",
+        "CautionConditions": "LİMİT VE TEMİNAT KOŞULLARI",
         "Guarantors": "KEFİLLER",
         "Constant": "ŞUBE TEKLİFİ VE KREDİ MÜDÜRLÜĞÜ GÖRÜŞÜ",
         "TeklifDetailInfo": "TEKLİF DETAY BİLGİLERİ",
