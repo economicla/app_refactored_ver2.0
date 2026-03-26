@@ -10,6 +10,7 @@ Async-first implementation with connection pooling
 import httpx
 
 import logging
+import time
 
 from typing import List, Optional
 
@@ -99,37 +100,36 @@ class JinaEmbeddingAdapter(IEmbeddingService):
         """Birden fazla metni batch olarak embed et - async implementation"""
 
         try:
-
+            t0 = time.monotonic()
             payload = {
-
                 "model": self.model,
-
                 "texts": texts
-
             }
 
             response = await self.client.post(
-
                 self.endpoint,
-
                 json=payload
-
             )
 
             response.raise_for_status()
+            elapsed_ms = (time.monotonic() - t0) * 1000
 
             result = response.json()
-
             embeddings = result.get("embeddings", [])
 
-            logger.info(f"✅ Generated {len(embeddings)} embeddings")
+            avg_input_len = sum(len(t) for t in texts) // max(len(texts), 1)
+            logger.info(
+                f"✅ Embeddings: {len(embeddings)} vectors, {elapsed_ms:.0f}ms "
+                f"(batch={len(texts)}, avg_input={avg_input_len} chars)"
+            )
 
             return embeddings
 
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ Embedding HTTP {e.response.status_code}: {e.response.text[:300]}")
+            raise
         except Exception as e:
-
-            logger.error(f"❌ Embedding failed: {str(e)}")
-
+            logger.error(f"❌ Embedding failed: {type(e).__name__}: {e}")
             raise
  
     async def get_dimension(self) -> int:
