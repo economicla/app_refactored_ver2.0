@@ -100,9 +100,9 @@ def load_configuration() -> dict:
         "vllm_timeout": get_env_int("VLLM_TIMEOUT", 300),
         
         # VLM Configuration (Vision-Language Model — PDF extraction)
-        "vlm_host": os.getenv("VLM_HOST", os.getenv("VLLM_HOST", "http://10.144.100.204")),
-        "vlm_port": get_env_int("VLM_PORT", 8814),
-        "vlm_model": os.getenv("VLM_MODEL", "RedHatAI/Qwen3-VL-32B-Instruct-NVFP4"),
+        "vlm_host": os.getenv("VLM_HOST", os.getenv("VLLM_HOST", "http://vllm-redhatai-qwen3-vl-32b-instruct-nvfp4.aiops.albarakaturk.local")),
+        "vlm_port": get_env_int("VLM_PORT", 0),
+        "vlm_model": os.getenv("VLM_MODEL", "redhatai-qwen3-vl-32b-instruct-nvfp4"),
         "vlm_timeout": get_env_int("VLM_TIMEOUT", 600),
 
         # RAG Configuration
