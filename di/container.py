@@ -123,9 +123,9 @@ class DIContainer:
             },
 
             'vlm': {
-                'host': vlm_host or vllm_host,
-                'port': vlm_port or vllm_port,
-                'model': vlm_model or vllm_model,
+                'host': vlm_host if vlm_host else vllm_host,
+                'port': vlm_port,
+                'model': vlm_model if vlm_model else vllm_model,
                 'timeout': vlm_timeout,
             }
 
