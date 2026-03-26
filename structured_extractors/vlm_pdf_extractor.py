@@ -103,7 +103,7 @@ class VLMPDFExtractor:
     """Vision-Language Model tabanlı PDF okuyucu.
 
     Kullanım:
-        extractor = VLMPDFExtractor(host="http://10.144.100.204", port=8814, model="...")
+        extractor = VLMPDFExtractor(host="http://vllm-model.example.local", model="model-name")
         result = await extractor.extract("rapor.pdf")
         markdown_text = result["markdown"]
     """
@@ -111,19 +111,20 @@ class VLMPDFExtractor:
     def __init__(
         self,
         host: str,
-        port: int,
-        model: str,
+        port: int = 0,
+        model: str = "",
         timeout: int = 600,
         max_concurrent: int = 1,
         dpi: int = 150,
     ):
-        self.host = host
+        self.host = host.rstrip("/")
         self.port = port
         self.model = model
         self.timeout = timeout
         self.max_concurrent = max_concurrent
         self.dpi = dpi
-        self.api_url = f"{host}:{port}/v1/chat/completions"
+        base = f"{self.host}:{port}" if port else self.host
+        self.api_url = f"{base}/v1/chat/completions"
 
     async def extract(
         self,
