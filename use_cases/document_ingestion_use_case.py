@@ -586,12 +586,18 @@ class DocumentIngestionUseCase:
             chunker = IntelligentChunker(chunk_size=1000, chunk_overlap=200)
             chunk_objects = chunker.chunk(text)
             chunks = [c['content'] for c in chunk_objects]
-            #Kaynak prefix ekle
             doc_label = filename.rsplit(".", 1)[0].replace("-", " ").replace("_", " ").title()
             doc_type = self._detect_document_type(filename, text)
             is_dictionary = self._is_dictionary_doc(filename, text)
             logger.info(f"📑 Doküman türü: {doc_type}, Sözlük: {is_dictionary}")
-            chunks = [f"[Kaynak: {doc_label} | Doküman Türü: {doc_type}]\n\n{c}" for c in chunks]
+            enriched: list[str] = []
+            for idx, c in enumerate(chunks):
+                header = chunk_objects[idx].get("header", "")
+                prefix = f"[Kaynak: {doc_label} | Doküman Türü: {doc_type}]"
+                if header:
+                    prefix += f"\n[Bölüm: {header}]"
+                enriched.append(f"{prefix}\n\n{c}")
+            chunks = enriched
  
             # Step 3: Embedding'ler oluştur
 
