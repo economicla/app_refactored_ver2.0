@@ -10,6 +10,7 @@ OpenAI-compatible API ile async communication (text + vision)
 from typing import AsyncGenerator, List, Optional
 
 import base64
+import time
 
 import httpx
 
@@ -132,28 +133,29 @@ class VLLMAdapter(ILLMService):
 
             }
 
+            t0 = time.monotonic()
             response = await self.client.post(
-
                 self.completions_endpoint,
-
                 json=payload
-
             )
-
             response.raise_for_status()
+            elapsed_ms = (time.monotonic() - t0) * 1000
 
             result = response.json()
-
             answer = result['choices'][0]['message']['content']
-
-            logger.info(f"✅ Generated response ({len(answer)} chars)")
+            usage = result.get("usage", {})
+            logger.info(
+                f"✅ LLM response: {len(answer)} chars, {elapsed_ms:.0f}ms, "
+                f"tokens={usage.get('prompt_tokens', '?')}+{usage.get('completion_tokens', '?')}"
+            )
 
             return answer
 
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ LLM HTTP {e.response.status_code}: {e.response.text[:300]}")
+            raise
         except Exception as e:
-
-            logger.error(f"❌ Generate response failed: {str(e)}")
-
+            logger.error(f"❌ LLM request failed: {type(e).__name__}: {e}")
             raise
  
     async def generate_vision_response(
