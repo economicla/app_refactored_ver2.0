@@ -109,13 +109,11 @@ class DocumentIngestionUseCase:
         try:
 
             if file_type == '.pdf':
-                is_intel = self._is_credit_intelligence_pdf(file_path, filename)
-                logger.debug(f"PDF detection: is_credit_intelligence={is_intel}, vlm_extractor={'YES' if self.vlm_extractor else 'NO'}")
-                if is_intel and self.vlm_extractor:
-                    logger.info("📑 İstihbarat Raporu detected → VLM extraction (Qwen3-VL)")
+                if self.vlm_extractor:
+                    logger.info("📑 PDF detected → VLM OCR extraction (all PDFs)")
                     return None  # VLM extraction handled async in execute()
 
-                logger.debug("Generic PDF extraction path selected")
+                logger.warning("⚠️ VLM extractor unavailable → falling back to generic PDF extraction")
                 return self._extract_pdf(file_path)
 
             elif file_type == '.docx':
