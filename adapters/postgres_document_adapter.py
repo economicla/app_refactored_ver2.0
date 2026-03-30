@@ -446,10 +446,11 @@ class PostgresDocumentAdapter(IDocumentRepository):
         self,
         embedding: List[float],
         document_id: Optional[str] = None,
+        document_ids: Optional[List[str]] = None,
         doc_type: Optional[str] = None,
         top_k: int = 5
     ) -> SearchResult:
-        """Document ID veya doc_type'a göre filtered search"""
+        """Document ID(ler) veya doc_type'a göre filtered search"""
         async with await self._get_session() as session:
             try:
                 distance = DocumentModel.embedding.cosine_distance(embedding)
@@ -467,9 +468,19 @@ class PostgresDocumentAdapter(IDocumentRepository):
                     )
                 )
 
-                if document_id:
-                    query = query.where(DocumentModel.filename == document_id)
-                    logger.info(f"🔍 Filtered search in document: {document_id}")
+                scoped: List[str] = []
+                if document_ids:
+                    scoped = [x.strip() for x in document_ids if x and str(x).strip()]
+                if not scoped and document_id and str(document_id).strip():
+                    scoped = [str(document_id).strip()]
+
+                if scoped:
+                    if len(scoped) == 1:
+                        query = query.where(DocumentModel.filename == scoped[0])
+                        logger.info(f"🔍 Filtered search in document: {scoped[0]}")
+                    else:
+                        query = query.where(DocumentModel.filename.in_(scoped))
+                        logger.info(f"🔍 Filtered search in {len(scoped)} documents: {scoped}")
                 elif doc_type:
                     query = query.where(
                         text("doc_metadata->>'doc_type' = :filter_doc_type").bindparams(
