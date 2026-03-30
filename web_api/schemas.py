@@ -25,6 +25,16 @@ class RAGQueryRequest(BaseModel):
     top_k: int = Field(default=10, ge=1, le=20, description="En iyi k sonuç")
 
     temperature: float = Field(default=0.7, ge=0.0, le=1.0, description="Yaratıcılık (0-1)")
+
+    filename: Optional[str] = Field(
+        default=None,
+        description="Sadece bu dosya adındaki chunk'larda ara (tek dosya; filenames ile birlikte verilirse filenames önceliklidir)",
+    )
+
+    filenames: Optional[List[str]] = Field(
+        default=None,
+        description="Sadece bu dosya adlarındaki chunk'larda ara (pipe'ta birden fazla doküman)",
+    )
  
     class Config:
 
