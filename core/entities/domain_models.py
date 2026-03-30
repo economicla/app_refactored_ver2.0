@@ -56,6 +56,10 @@ class RAGQuery:
     temperature: float = 0.3
 
     user_id: str = "anonymous"
+
+    filename: Optional[str] = None
+
+    filenames: Optional[List[str]] = None
  
  
 @dataclass
