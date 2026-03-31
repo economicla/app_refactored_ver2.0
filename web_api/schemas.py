@@ -47,8 +47,21 @@ class RAGQueryRequest(BaseModel):
             "temperature": 0.7
 
         }
- 
- 
+
+
+class ScopedRAGQueryRequest(BaseModel):
+
+    """Sadece belirtilen dosya(lar)da RAG — filenames zorunlu (entegrasyon / kredi botları için)."""
+
+    query: str = Field(..., min_length=1, max_length=5000)
+
+    filenames: List[str] = Field(..., min_length=1, description="En az bir ingest edilmiş dosya adı")
+
+    top_k: int = Field(default=10, ge=1, le=20)
+
+    temperature: float = Field(default=0.7, ge=0.0, le=1.0)
+
+
 # ============ RESPONSE SCHEMAS ============
  
 class DocumentChunkResponse(BaseModel):
