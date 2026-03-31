@@ -146,6 +146,8 @@ class IDocumentRepository(ABC):
 
         document_id: Optional[str] = None,
 
+        document_ids: Optional[List[str]] = None,
+
         doc_type: Optional[str] = None,
 
         top_k: int = 5
@@ -160,7 +162,9 @@ class IDocumentRepository(ABC):
 
             embedding: Arama embedding'i
 
-            document_id: Opsiyonel dosya adı filtresi
+            document_id: Opsiyonel tek dosya adı filtresi
+
+            document_ids: Opsiyonel birden fazla dosya adı (document_id ile birlikte verilirse birleştirilir)
 
             doc_type: Opsiyonel doküman türü filtresi (metadata doc_type)
 
