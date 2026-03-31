@@ -320,7 +320,11 @@ async def query_documents(
 
             top_k=request.top_k,
 
-            temperature=request.temperature
+            temperature=request.temperature,
+
+            filename=request.filename,
+
+            filenames=request.filenames,
 
         )
 
@@ -406,7 +410,11 @@ async def stream_query_generator(
 
     container: DIContainer,
 
-    start_time: float
+    start_time: float,
+
+    filename: Optional[str] = None,
+
+    filenames: Optional[List[str]] = None,
 
 ) -> AsyncGenerator[str, None]:
 
@@ -428,7 +436,11 @@ async def stream_query_generator(
 
             top_k=top_k,
 
-            temperature=temperature
+            temperature=temperature,
+
+            filename=filename,
+
+            filenames=filenames,
 
         )
 
@@ -609,7 +621,11 @@ async def query_documents_stream(
 
                 container=container,
 
-                start_time=start_time
+                start_time=start_time,
+
+                filename=request.filename,
+
+                filenames=request.filenames,
 
             ),
 
