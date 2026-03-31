@@ -1809,17 +1809,34 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
     # DOCUMENT-TYPE-AWARE STRICT RETRIEVAL
     # ================================================================
 
+    def _resolve_scoped_filenames(self, query: RAGQuery) -> Optional[List[str]]:
+        """API'deki filenames veya filename ile kapsam listesi (öncelik: filenames)."""
+        out: List[str] = []
+        if getattr(query, "filenames", None):
+            for f in query.filenames:
+                s = (f or "").strip()
+                if s:
+                    out.append(s)
+        if out:
+            return out
+        fn = (getattr(query, "filename", None) or "").strip()
+        if fn:
+            return [fn]
+        return None
+
     async def _retrieve_documents(
         self,
         query_embedding: List[float],
         query_text: str,
         top_k: int,
-        dict_headers: List[str]
+        dict_headers: List[str],
+        filename_filters: Optional[List[str]] = None,
     ) -> Tuple[list, Dict]:
         """
         Document-type-aware strict filtered retrieval.
 
         Strategy:
+        - If filename_filters set: ONLY those files, no global fallback
         - If preferred_type detected:
             1. Run filtered search by doc_type (normalized)
             2. filtered_count >= 1 → STRICT_FILTERED: use ONLY filtered, no global
@@ -1829,6 +1846,69 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         Returns:
             (reranked_docs, debug_info_dict)
         """
+        scopes = filename_filters or []
+        if scopes:
+            routing = self._detect_query_intent(query_text)
+            candidate_k = top_k * 6
+            debug: Dict = {
+                "preferred_type": None,
+                "retrieval_mode": "SCOPED_DOCUMENTS",
+                "filtered_count": 0,
+                "top3_chunks": [],
+                "routing_decision": routing,
+                "filename_filters": scopes,
+            }
+            try:
+                filtered_result = await self.document_repository.search_similar_filtered(
+                    embedding=query_embedding,
+                    document_ids=scopes,
+                    top_k=candidate_k,
+                )
+                candidates = filtered_result.documents
+            except Exception as e:
+                logger.warning(f"⚠️ Scoped-document search failed: {e}")
+                candidates = []
+            debug["filtered_count"] = len(candidates)
+            logger.info(
+                f"📊 Retrieval mode=SCOPED_DOCUMENTS | files={scopes} | candidates={len(candidates)}"
+            )
+            if not candidates:
+                return [], debug
+            reranked = self._rerank_chunks(
+                candidates, query_text, top_k, dict_headers=dict_headers
+            )
+            top3 = []
+            for i, doc in enumerate(reranked[:3]):
+                doc_type = self._resolve_doc_type(doc)
+                sim = getattr(doc, "similarity_score", 0)
+                top3.append({
+                    "rank": i + 1,
+                    "filename": doc.filename,
+                    "doc_type": doc_type,
+                    "similarity_score": round(sim, 4),
+                })
+                logger.info(
+                    f"📊 Selected Top-{i+1}: {doc.filename} | "
+                    f"doc_type={doc_type} | sim={sim:.3f}"
+                )
+            debug["top3_chunks"] = top3
+            bank_resolution = self._resolve_bank_entity(query_text, candidates)
+            if bank_resolution is not None:
+                debug["bank_normalization"] = bank_resolution
+                if routing and routing.get("matched_rule_id") != "EXTERNAL_BANK":
+                    debug["routing_decision"] = routing or {}
+                    debug["routing_decision"]["bank_override"] = True
+                guardrail = self._apply_bank_guardrail(
+                    bank_resolution, reranked, all_candidates=candidates
+                )
+                scoped_docs = guardrail.pop("scoped_docs", None)
+                debug["bank_guardrail"] = guardrail
+                if not guardrail["passed"]:
+                    return [], debug
+                if scoped_docs:
+                    reranked = scoped_docs
+            return reranked, debug
+
         routing = self._detect_query_intent(query_text)
         preferred_type = self._normalize_doc_type(routing["doc_type"]) if routing else None
         q_lower = query_text.lower()
@@ -2100,7 +2180,8 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 query_embedding=query_embedding,
                 query_text=query.query,
                 top_k=effective_k,
-                dict_headers=dict_headers
+                dict_headers=dict_headers,
+                filename_filters=self._resolve_scoped_filenames(query),
             )
 
             # Bank-scope guardrail — deterministic safe answer, no LLM call
@@ -2565,7 +2646,8 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                 query_embedding=query_embedding,
                 query_text=query.query,
                 top_k=effective_k,
-                dict_headers=dict_headers
+                dict_headers=dict_headers,
+                filename_filters=self._resolve_scoped_filenames(query),
             )
 
             # Bank-scope guardrail — deterministic safe answer, no LLM call
