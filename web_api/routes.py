@@ -51,6 +51,8 @@ from app_refactored.web_api.schemas import (
 
     RAGQueryResponse,
 
+    ScopedRAGQueryRequest,
+
     DocumentIngestionResponse,
 
     DocumentChunkResponse,
@@ -279,7 +281,64 @@ async def health_check(container: DIContainer = Depends(get_di_container)):
  
  
 # ============ RAG QUERY ============
- 
+
+async def _execute_rag_query(request: RAGQueryRequest, container: DIContainer) -> RAGQueryResponse:
+    """Ortak RAG çalıştırma (global veya filename/filenames ile kapsamlı)."""
+    import time
+
+    start_time = time.time()
+    logger.info(f"📥 RAG Query: {request.query[:50]}...")
+
+    rag_use_case = container.get_rag_query_use_case()
+    query = RAGQuery(
+        query=request.query,
+        top_k=request.top_k,
+        temperature=request.temperature,
+        filename=request.filename,
+        filenames=request.filenames,
+    )
+    result = await rag_use_case.execute(query)
+
+    sources = [
+        DocumentChunkResponse(
+            id=doc.chunk_index,
+            filename=doc.filename,
+            chunk_index=doc.chunk_index,
+            content=doc.content_preview,
+            similarity_score=doc.similarity_score,
+            metadata={},
+            created_at=None,
+        )
+        for doc in result.sources
+    ]
+
+    response = RAGQueryResponse(
+        question=result.question,
+        answer=result.answer,
+        sources=sources,
+        model=result.model,
+        timestamp=result.timestamp,
+        debug_info=result.debug_info,
+    )
+
+    response_time_ms = int((time.time() - start_time) * 1000)
+    top_source = result.sources[0].filename if result.sources else "N/A"
+
+    try:
+        await container.get_document_repository().log_query(
+            query_text=request.query,
+            answer_preview=result.answer[:200],
+            response_time_ms=response_time_ms,
+            chunks_retrieved=len(result.sources),
+            top_source=top_source,
+        )
+        logger.info(f"✅ Query logged: {response_time_ms}ms, {len(result.sources)} chunks")
+    except Exception as log_error:
+        logger.warning(f"⚠️ Query logging failed (non-critical): {log_error}")
+
+    return response
+
+
 @router.post("/query", response_model=RAGQueryResponse)
 
 async def query_documents(
@@ -300,101 +359,44 @@ async def query_documents(
 
     - LLM'den cevap al
 
+    - Opsiyonel: filename veya filenames ile sadece belirli ingest dosyalarında ara
+
     """
-    import time 
-    start_time = time.time() # TIMER BAŞLA
-
     try:
-
-        logger.info(f"📥 RAG Query: {request.query[:50]}...")
-
-        # Use Case'i al
-
-        rag_use_case = container.get_rag_query_use_case()
-
-        # Query object oluştur
-
-        query = RAGQuery(
-
-            query=request.query,
-
-            top_k=request.top_k,
-
-            temperature=request.temperature,
-
-            filename=request.filename,
-
-            filenames=request.filenames,
-
-        )
-
-        # Execute use case
-
-        result = await rag_use_case.execute(query)
-
-        # Convert to response
-
-        sources = [
-
-            DocumentChunkResponse(
-
-                id=doc.chunk_index,
-
-                filename=doc.filename,
-
-                chunk_index=doc.chunk_index,
-
-                content=doc.content_preview,
-
-                similarity_score=doc.similarity_score,
-
-                metadata={},
-
-                created_at=None
-
-            )
-
-            for doc in result.sources
-
-        ]
-
-        response = RAGQueryResponse(
-
-            question=result.question,
-
-            answer=result.answer,
-
-            sources=sources,
-
-            model=result.model,
-
-            timestamp=result.timestamp,
-
-            debug_info=result.debug_info
-
-        )
-
-        response_time_ms = int((time.time() - start_time) *1000)
-        top_source = result.sources[0].filename if result.sources else "N/A"
-
-        try:
-            await container.get_document_repository().log_query(
-                query_text=request.query,
-                answer_preview=result.answer[:200],
-                response_time_ms=response_time_ms,
-                chunks_retrieved=len(result.sources),
-                top_source=top_source
-            )
-            logger.info(f"✅ Query logged: {response_time_ms}ms, {len(result.sources)} chunks")
-        except Exception as log_error:
-            logger.warning(f"⚠️ Query logging failed (non-critical): {log_error}")
-
-        return response
-
+        return await _execute_rag_query(request, container)
     except Exception as e:
-
         logger.error(f"❌ Query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.post("/query/scoped", response_model=RAGQueryResponse)
+
+async def query_documents_scoped(
+
+    request: ScopedRAGQueryRequest,
+
+    container: DIContainer = Depends(get_di_container),
+
+):
+
+    """
+
+    Kapsamlı RAG — yalnızca verilen dosya adlarında arama (filenames zorunlu).
+
+    Mevcut kredi / özel bot entegrasyonları için; global RAG yerine sabit dosya kümesi.
+
+    """
+    try:
+        unified = RAGQueryRequest(
+            query=request.query,
+            top_k=request.top_k,
+            temperature=request.temperature,
+            filename=None,
+            filenames=request.filenames,
+        )
+        return await _execute_rag_query(unified, container)
+    except Exception as e:
+        logger.error(f"❌ Scoped query failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
  
  
