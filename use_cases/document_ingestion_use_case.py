@@ -9,6 +9,7 @@ Desteklenen formatlar: PDF (istihbarat raporu: markdown tabanlı extraction), DO
 """
 
 import logging
+import re
 import time
 
 from datetime import datetime
@@ -594,9 +595,39 @@ class DocumentIngestionUseCase:
             doc_label = filename.rsplit(".", 1)[0].replace("-", " ").replace("_", " ").title()
             doc_type = self._detect_document_type(filename, text)
             is_dictionary = self._is_dictionary_doc(filename, text)
+
+            # Sayfa haritası: metindeki ## Sayfa N konumlarından chunk → sayfa eşlemesi
+            _page_positions = [
+                (m.start(), int(m.group(1)))
+                for m in re.finditer(r"(?m)^#+\s*Sayfa\s+(\d+)\s*$", text)
+            ]
+
+            def _find_page(content: str) -> Optional[str]:
+                if not _page_positions:
+                    return None
+                snippet = content[:200].strip()
+                if not snippet:
+                    return None
+                pos = text.find(snippet)
+                if pos == -1:
+                    snippet = content[:80].strip()
+                    pos = text.find(snippet)
+                if pos == -1:
+                    return None
+                page = None
+                for pp_start, pp_num in _page_positions:
+                    if pp_start <= pos:
+                        page = str(pp_num)
+                    else:
+                        break
+                return page
+
             enriched: list[str] = []
+            _chunk_pages: list[Optional[str]] = []
             for idx, c in enumerate(chunks):
                 header = chunk_objects[idx].get("header", "")
+                source_page = _find_page(c)
+                _chunk_pages.append(source_page)
                 prefix = f"[Kaynak: {doc_label} | Doküman Türü: {doc_type}]"
                 if header:
                     prefix += f"\n[Bölüm: {header}]"
@@ -643,6 +674,9 @@ class DocumentIngestionUseCase:
                     "doc_type": doc_type,
                     "is_dictionary": is_dictionary,
                 }
+                sp = _chunk_pages[idx] if idx < len(_chunk_pages) else None
+                if sp:
+                    meta["source_page"] = sp
                 if idx == 0:
                     if bi_list is not None:
                         meta["banka_istihbarati"] = bi_list
