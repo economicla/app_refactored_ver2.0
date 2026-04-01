@@ -138,7 +138,7 @@ KAYNAKLAR:
   - [Dosya: dosya_adı]
   - [Sayfa: N veya N-M] (Kontekstte [Kaynak ... | Sayfa: ...] satırında verilmişse zorunlu; yoksa bu maddeyi yazma)
   - [Bölüm: başlık]
-  - [Güven: Yüksek/Orta/Düşük]
+  - [Güven: %XX] (Kontekstteki [Benzerlik: %XX] değerini aynen yaz)
 
 UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcut değil" yaz. Eğer kontekstte herhangi bir sayısal veri veya dönem bilgisi varsa, onu kullanarak mutlaka cevap ver."""
 
@@ -161,11 +161,18 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         self.llm_service = llm_service
 
     @staticmethod
-    def _infer_source_pages_from_chunk(content: str) -> Optional[str]:
+    def _infer_source_pages_from_chunk(
+        content: str,
+        metadata: Optional[dict] = None,
+    ) -> Optional[str]:
         """
-        Chunk metnindeki markdown '## Sayfa N' / '# Sayfa N' işaretlerinden sayfa numarası çıkarır.
-        VLM ve pdfplumber çıktıları bu biçimi kullanır. Birden fazla sayfa kapsanıyorsa 'a-b' döner.
+        Chunk'ın hangi sayfadan geldiğini belirler.
+        1) metadata['source_page'] (ingestion sırasında hesaplanır)
+        2) Fallback: chunk metnindeki '## Sayfa N' regex ile arar
         """
+        if metadata and metadata.get("source_page"):
+            return str(metadata["source_page"])
+
         if not (content and content.strip()):
             return None
         nums: List[int] = []
@@ -2518,22 +2525,24 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     header = doc.metadata.get('header')
                 
                 doc_type = self._resolve_doc_type(doc)
-                source_pages = self._infer_source_pages_from_chunk(doc.content)
+                doc_meta = getattr(doc, "metadata", None) or {}
+                source_pages = self._infer_source_pages_from_chunk(doc.content, doc_meta)
+
+                similarity_score = getattr(doc, 'similarity_score', 0)
+                sim_pct = round(similarity_score * 100)
 
                 if idx == 0:
                     logger.info(f"📋 Top chunk [{doc.filename}] header={header} "
-                                f"type={doc_type} "
-                                f"sim={getattr(doc, 'similarity_score', 0):.3f} "
+                                f"type={doc_type} page={source_pages} "
+                                f"sim={similarity_score:.3f} "
                                 f"len={len(doc.content)} "
                                 f"preview={doc.content[:300]}")
                 
                 header_text = f" [{header}]" if header else ""
                 page_text = f" | Sayfa: {source_pages}" if source_pages else ""
                 context_parts.append(
-                    f"[Kaynak {idx+1}: {doc.filename}{page_text}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
+                    f"[Kaynak {idx+1}: {doc.filename}{page_text}{header_text}] [Benzerlik: %{sim_pct}] [Doküman Türü: {doc_type}]\n{doc.content}"
                 )
-                
-                similarity_score = getattr(doc, 'similarity_score', 0)
                 content_preview = doc.content[:150] + "..." if len(doc.content) > 150 else doc.content
                 
                 sources_with_metadata.append(
@@ -2715,15 +2724,18 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                     header = doc.metadata.get('header')
                 
                 doc_type = self._resolve_doc_type(doc)
-                source_pages = self._infer_source_pages_from_chunk(doc.content)
+                doc_meta = getattr(doc, "metadata", None) or {}
+                source_pages = self._infer_source_pages_from_chunk(doc.content, doc_meta)
+
+                similarity_score = getattr(doc, 'similarity_score', 0)
+                sim_pct = round(similarity_score * 100)
 
                 header_text = f" [{header}]" if header else ""
                 page_text = f" | Sayfa: {source_pages}" if source_pages else ""
                 context_parts.append(
-                    f"[Kaynak {idx+1}: {doc.filename}{page_text}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
+                    f"[Kaynak {idx+1}: {doc.filename}{page_text}{header_text}] [Benzerlik: %{sim_pct}] [Doküman Türü: {doc_type}]\n{doc.content}"
                 )
                 
-                similarity_score = getattr(doc, 'similarity_score', 0)
                 content_preview = doc.content[:150] + "..." if len(doc.content) > 150 else doc.content
                 
                 sources_with_metadata.append(
@@ -2800,7 +2812,7 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             for source in sources_with_metadata:
                 header_info = f" - {source.header}" if source.header else ""
                 page_info = f" | Sayfa {source.source_pages}" if getattr(source, "source_pages", None) else ""
-                yield f"  • {source.filename}{page_info}{header_info} (Similarity: {source.similarity_score:.2f})\n"
+                yield f"  • {source.filename}{page_info}{header_info} (Güven: %{round(source.similarity_score * 100)})\n"
             yield "\n" + "="*70 + "\n\n"
             
             # Stream cevapları gönder
