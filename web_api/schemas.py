@@ -81,6 +81,11 @@ class DocumentChunkResponse(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
     created_at: Optional[datetime] = None
+
+    source_pages: Optional[str] = Field(
+        default=None,
+        description="Dokümandaki sayfa veya aralık (örn. '12' veya '3-5'); chunk metninden çıkarılır",
+    )
  
     class Config:
 
@@ -96,7 +101,9 @@ class DocumentChunkResponse(BaseModel):
 
             "similarity_score": 0.85,
 
-            "metadata": {"file_type": "docx", "chunk_size": 1000}
+            "metadata": {"file_type": "docx", "chunk_size": 1000},
+
+            "source_pages": "4",
 
         }
  
