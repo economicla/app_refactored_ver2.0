@@ -35,7 +35,9 @@ class JinaEmbeddingAdapter(IEmbeddingService):
 
         timeout: int = 600,
 
-        max_connections: int = 10
+        max_connections: int = 10,
+
+        embed_batch_size: int = 128,
 
     ):
 
@@ -55,6 +57,8 @@ class JinaEmbeddingAdapter(IEmbeddingService):
 
             max_connections: Connection pool maksimum bağlantı sayısı
 
+            embed_batch_size: Tek HTTP isteğinde en fazla kaç metin (ReadTimeout / payload önlemi)
+
         """
 
         self.host = host
@@ -64,6 +68,8 @@ class JinaEmbeddingAdapter(IEmbeddingService):
         self.model = model
 
         self.timeout = timeout
+
+        self.embed_batch_size = max(1, int(embed_batch_size))
 
         self.endpoint = f"{host}:{self.port}/embed/text"
 
@@ -97,7 +103,36 @@ class JinaEmbeddingAdapter(IEmbeddingService):
  
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
 
-        """Birden fazla metni batch olarak embed et - async implementation"""
+        """Birden fazla metni embed et; büyük listeleri alt-batch'lere böler (timeout / bellek)."""
+
+        if not texts:
+            return []
+
+        bs = self.embed_batch_size
+        if len(texts) <= bs:
+            return await self._embed_batch_chunk(texts)
+
+        t_all = time.monotonic()
+        out: List[List[float]] = []
+        n = len(texts)
+        for start in range(0, n, bs):
+            chunk = texts[start : start + bs]
+            part = await self._embed_batch_chunk(chunk)
+            if len(part) != len(chunk):
+                raise RuntimeError(
+                    f"Embedding count mismatch in sub-batch: got {len(part)}, expected {len(chunk)}"
+                )
+            out.extend(part)
+        total_ms = (time.monotonic() - t_all) * 1000
+        logger.info(
+            f"✅ Embeddings (batched): {len(out)} vectors in {total_ms:.0f}ms "
+            f"({(n + bs - 1) // bs} HTTP calls, sub_batch_size={bs})"
+        )
+        return out
+
+    async def _embed_batch_chunk(self, texts: List[str]) -> List[List[float]]:
+
+        """Tek HTTP isteği — en fazla embed_batch_size metin."""
 
         try:
             t0 = time.monotonic()
