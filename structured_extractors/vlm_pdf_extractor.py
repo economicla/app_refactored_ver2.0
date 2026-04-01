@@ -131,6 +131,7 @@ class VLMPDFExtractor:
         pdf_path: str,
         *,
         image_folder: Optional[str] = None,
+        source_display_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Extract structured markdown from a PDF using VLM.
 
@@ -138,6 +139,8 @@ class VLMPDFExtractor:
             pdf_path: Path to the PDF file.
             image_folder: Optional path to pre-rendered page images.
                           If provided, skips PDF→image conversion.
+            source_display_name: Orijinal yükleme dosya adı (örn. rapor.pdf). Verilmezse
+                pdf_path'in basename'i kullanılır; tempfile adları chunk başlıklarında kötü görünür.
 
         Returns:
             Dict with keys: markdown, meta, pages (per-page results).
@@ -168,7 +171,8 @@ class VLMPDFExtractor:
         markdown_parts: List[str] = []
         errors: List[str] = []
 
-        source_file = Path(pdf_path).name
+        raw_label = (source_display_name or "").strip() or Path(pdf_path).name
+        source_file = Path(raw_label).name
         markdown_parts.append(f"# İstihbarat Raporu — {source_file}\n")
         markdown_parts.append(f"Sayfa sayısı: {total}\n")
 
