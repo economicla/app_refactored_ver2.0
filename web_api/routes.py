@@ -308,6 +308,7 @@ async def _execute_rag_query(request: RAGQueryRequest, container: DIContainer) -
             similarity_score=doc.similarity_score,
             metadata={},
             created_at=None,
+            source_pages=getattr(doc, "source_pages", None),
         )
         for doc in result.sources
     ]
@@ -458,7 +459,8 @@ async def stream_query_generator(
                     "chunk_index": doc.chunk_index,
                     "header": doc.header,
                     "similarity_score": doc.similarity_score,
-                    "content_preview": doc.content_preview
+                    "content_preview": doc.content_preview,
+                    "source_pages": getattr(doc, "source_pages", None),
                 }
                 for doc in result.sources
             ]
