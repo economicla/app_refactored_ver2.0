@@ -95,6 +95,7 @@ def load_configuration() -> dict:
         "jina_port": get_env_int("JINA_PORT", 38001),
         "jina_model": os.getenv("JINA_MODEL", "jinaai/jina-embeddings-v3"),
         "jina_timeout": get_env_int("JINA_TIMEOUT", 600),
+        "jina_embed_batch_size": get_env_int("JINA_EMBED_BATCH_SIZE", 128),
         
         # vLLM Configuration
         "vllm_host": os.getenv("VLLM_HOST", "http://10.144.100.204"),
@@ -174,6 +175,7 @@ async def init_di_container():
             jina_port=CONFIG['jina_port'],
             jina_model=CONFIG['jina_model'],
             jina_timeout=CONFIG['jina_timeout'],
+            jina_embed_batch_size=CONFIG['jina_embed_batch_size'],
             
             # PostgreSQL Configuration
             postgres_url=postgres_url,
