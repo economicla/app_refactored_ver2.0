@@ -165,9 +165,12 @@ class DocumentIngestionUseCase:
         return False
 
 
-    async def _extract_pdf_vlm(self, file_path: str) -> str:
+    async def _extract_pdf_vlm(self, file_path: str, original_filename: str) -> str:
         """VLM (Qwen3-VL) ile PDF sayfalarını görüntü olarak okuyup markdown üret."""
-        result = await self.vlm_extractor.extract(file_path)
+        result = await self.vlm_extractor.extract(
+            file_path,
+            source_display_name=original_filename,
+        )
 
         self._structured_json = None
         errors = result.get("errors", [])
@@ -557,7 +560,7 @@ class DocumentIngestionUseCase:
 
             if text is None and self.vlm_extractor:
                 logger.info(f"📑 Sync extraction returned None → VLM extraction for {Path(filename).name}")
-                text = await self._extract_pdf_vlm(file_path)
+                text = await self._extract_pdf_vlm(file_path, filename)
 
             if text is None:
                 raise ValueError("Text extraction returned None — both sync and VLM paths failed")
