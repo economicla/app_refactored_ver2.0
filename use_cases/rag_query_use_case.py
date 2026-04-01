@@ -56,6 +56,7 @@ class SourceWithMetadata:
     similarity_score: float
     content_preview: str
     chunk_size: int
+    source_pages: Optional[str] = None  # "12" veya "12-15" (chunk içindeki Sayfa işaretlerinden)
 
 
 class RAGQueryUseCase:
@@ -135,6 +136,7 @@ BANKA İSTİHBARATI VE LİMİT RİSK TABLOLARI:
 CEVAP: [Detaylı ve kesin yanıt]
 KAYNAKLAR: 
   - [Dosya: dosya_adı]
+  - [Sayfa: N veya N-M] (Kontekstte [Kaynak ... | Sayfa: ...] satırında verilmişse zorunlu; yoksa bu maddeyi yazma)
   - [Bölüm: başlık]
   - [Güven: Yüksek/Orta/Düşük]
 
@@ -157,6 +159,22 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         self.embedding_service = embedding_service
         self.document_repository = document_repository
         self.llm_service = llm_service
+
+    @staticmethod
+    def _infer_source_pages_from_chunk(content: str) -> Optional[str]:
+        """
+        Chunk metnindeki markdown '## Sayfa N' / '# Sayfa N' işaretlerinden sayfa numarası çıkarır.
+        VLM ve pdfplumber çıktıları bu biçimi kullanır. Birden fazla sayfa kapsanıyorsa 'a-b' döner.
+        """
+        if not (content and content.strip()):
+            return None
+        nums: List[int] = []
+        for m in re.finditer(r"(?m)^#+\s*Sayfa\s+(\d+)\s*$", content):
+            nums.append(int(m.group(1)))
+        if not nums:
+            return None
+        lo, hi = min(nums), max(nums)
+        return str(lo) if lo == hi else f"{lo}-{hi}"
 
     # ================================================================
     # PRIORITY-ORDERED ROUTING RULES
@@ -2500,6 +2518,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     header = doc.metadata.get('header')
                 
                 doc_type = self._resolve_doc_type(doc)
+                source_pages = self._infer_source_pages_from_chunk(doc.content)
 
                 if idx == 0:
                     logger.info(f"📋 Top chunk [{doc.filename}] header={header} "
@@ -2509,8 +2528,9 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                                 f"preview={doc.content[:300]}")
                 
                 header_text = f" [{header}]" if header else ""
+                page_text = f" | Sayfa: {source_pages}" if source_pages else ""
                 context_parts.append(
-                    f"[Kaynak {idx+1}: {doc.filename}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
+                    f"[Kaynak {idx+1}: {doc.filename}{page_text}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
                 )
                 
                 similarity_score = getattr(doc, 'similarity_score', 0)
@@ -2523,7 +2543,8 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                         header=header,
                         similarity_score=similarity_score,
                         content_preview=content_preview,
-                        chunk_size=len(doc.content)
+                        chunk_size=len(doc.content),
+                        source_pages=source_pages,
                     )
                 )
             
@@ -2694,10 +2715,12 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                     header = doc.metadata.get('header')
                 
                 doc_type = self._resolve_doc_type(doc)
+                source_pages = self._infer_source_pages_from_chunk(doc.content)
 
                 header_text = f" [{header}]" if header else ""
+                page_text = f" | Sayfa: {source_pages}" if source_pages else ""
                 context_parts.append(
-                    f"[Kaynak {idx+1}: {doc.filename}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
+                    f"[Kaynak {idx+1}: {doc.filename}{page_text}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
                 )
                 
                 similarity_score = getattr(doc, 'similarity_score', 0)
@@ -2710,7 +2733,8 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
                         header=header,
                         similarity_score=similarity_score,
                         content_preview=content_preview,
-                        chunk_size=len(doc.content)
+                        chunk_size=len(doc.content),
+                        source_pages=source_pages,
                     )
                 )
             
@@ -2775,7 +2799,8 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             yield f"📚 KAYNAKLAR ({len(sources_with_metadata)} chunk):\n"
             for source in sources_with_metadata:
                 header_info = f" - {source.header}" if source.header else ""
-                yield f"  • {source.filename}{header_info} (Similarity: {source.similarity_score:.2f})\n"
+                page_info = f" | Sayfa {source.source_pages}" if getattr(source, "source_pages", None) else ""
+                yield f"  • {source.filename}{page_info}{header_info} (Similarity: {source.similarity_score:.2f})\n"
             yield "\n" + "="*70 + "\n\n"
             
             # Stream cevapları gönder
