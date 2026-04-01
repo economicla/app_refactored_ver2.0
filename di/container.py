@@ -58,6 +58,8 @@ class DIContainer:
 
         jina_timeout: int = 600,
 
+        jina_embed_batch_size: int = 128,
+
         postgres_pool_size: int = 20,
 
         postgres_max_overflow: int = 10,
@@ -88,7 +90,9 @@ class DIContainer:
 
                 'model': jina_model,
 
-                'timeout': jina_timeout
+                'timeout': jina_timeout,
+
+                'embed_batch_size': jina_embed_batch_size,
 
             },
 
@@ -161,7 +165,9 @@ class DIContainer:
 
                 model=self.config['jina']['model'],
 
-                timeout=self.config['jina']['timeout']
+                timeout=self.config['jina']['timeout'],
+
+                embed_batch_size=self.config['jina']['embed_batch_size'],
 
             )
 
