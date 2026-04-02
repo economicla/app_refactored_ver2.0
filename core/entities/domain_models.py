@@ -35,6 +35,8 @@ class DocumentChunk:
     metadata: Dict[str, any] = field(default_factory=dict)
 
     created_at: Optional[datetime] = None
+
+    collection: Optional[str] = None
  
     def __post_init__(self):
 
@@ -60,6 +62,8 @@ class RAGQuery:
     filename: Optional[str] = None
 
     filenames: Optional[List[str]] = None
+
+    collection: Optional[str] = None
  
  
 @dataclass
