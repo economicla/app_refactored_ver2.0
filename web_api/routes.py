@@ -23,6 +23,8 @@ from fastapi import (
 
     File, 
 
+    Form,
+
     UploadFile, 
 
     Depends, 
@@ -282,12 +284,16 @@ async def health_check(container: DIContainer = Depends(get_di_container)):
  
 # ============ RAG QUERY ============
 
-async def _execute_rag_query(request: RAGQueryRequest, container: DIContainer) -> RAGQueryResponse:
-    """Ortak RAG çalıştırma (global veya filename/filenames ile kapsamlı)."""
+async def _execute_rag_query(
+    request: RAGQueryRequest,
+    container: DIContainer,
+    collection: Optional[str] = None,
+) -> RAGQueryResponse:
+    """Ortak RAG çalıştırma (global, filename/filenames veya collection ile kapsamlı)."""
     import time
 
     start_time = time.time()
-    logger.info(f"📥 RAG Query: {request.query[:50]}...")
+    logger.info(f"📥 RAG Query: {request.query[:50]}... (collection={collection})")
 
     rag_use_case = container.get_rag_query_use_case()
     query = RAGQuery(
@@ -296,6 +302,7 @@ async def _execute_rag_query(request: RAGQueryRequest, container: DIContainer) -
         temperature=request.temperature,
         filename=request.filename,
         filenames=request.filenames,
+        collection=collection,
     )
     result = await rag_use_case.execute(query)
 
@@ -382,11 +389,16 @@ async def query_documents_scoped(
 
     """
 
-    Kapsamlı RAG — yalnızca verilen dosya adlarında arama (filenames zorunlu).
+    Kapsamlı RAG — dosya adları ve/veya koleksiyon ile filtrelenmiş arama.
 
-    Mevcut kredi / özel bot entegrasyonları için; global RAG yerine sabit dosya kümesi.
+    collection veya filenames'den en az biri verilmelidir.
 
     """
+    if not request.filenames and not request.collection:
+        raise HTTPException(
+            status_code=422,
+            detail="filenames veya collection parametrelerinden en az biri gereklidir.",
+        )
     try:
         unified = RAGQueryRequest(
             query=request.query,
@@ -395,7 +407,7 @@ async def query_documents_scoped(
             filename=None,
             filenames=request.filenames,
         )
-        return await _execute_rag_query(unified, container)
+        return await _execute_rag_query(unified, container, collection=request.collection)
     except Exception as e:
         logger.error(f"❌ Scoped query failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -652,6 +664,8 @@ async def ingest_document(
 
     file: UploadFile = File(...),
 
+    collection: Optional[str] = Form(default=None, description="Koleksiyon adı (ör. 'kredi', 'egitim')"),
+
     container: DIContainer = Depends(get_di_container)
 
 ):
@@ -662,13 +676,15 @@ async def ingest_document(
 
     Desteklenen formatlar: PDF, DOCX, TXT, XLSX, PPTX
 
+    Opsiyonel: collection parametresi ile dokümanı bir koleksiyona ata
+
     """
 
     temp_file_path = None
 
     try:
 
-        logger.info(f"📥 Ingesting file: {file.filename}")
+        logger.info(f"📥 Ingesting file: {file.filename} (collection={collection})")
 
         # Geçici dosya oluştur
 
@@ -684,13 +700,9 @@ async def ingest_document(
 
                 f.write(content)
 
-        # Use Case'i al
-
         ingestion_use_case = container.get_document_ingestion_use_case()
 
-        # Execute use case
-
-        result = await ingestion_use_case.execute(temp_file_path, file.filename)
+        result = await ingestion_use_case.execute(temp_file_path, file.filename, collection=collection)
 
         return DocumentIngestionResponse(
 
@@ -1098,6 +1110,7 @@ async def list_documents(container: DIContainer = Depends(get_di_container)):
             results.append({
                 "id": doc.id,
                 "filename": doc.filename,
+                "collection": getattr(doc, "collection", None),
                 "chunk_index": getattr(doc, "chunk_index", 0),
                 "created_at": created,
                 "metadata": getattr(doc, "metadata", None) or {},
