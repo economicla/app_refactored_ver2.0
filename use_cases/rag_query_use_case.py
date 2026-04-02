@@ -137,7 +137,7 @@ CEVAP: [Detaylı ve kesin yanıt]
 KAYNAKLAR: 
   - [Dosya: dosya_adı]
   - [Sayfa: N veya N-M] (Kontekstte [Kaynak ... | Sayfa: ...] satırında verilmişse zorunlu; yoksa bu maddeyi yazma)
-  - [Bölüm: başlık]
+  - [Bölüm: başlık] (Kontekstte [...] içinde kısa başlık varsa yaz; başlık yoksa bu satırı atla)
   - [Güven: %XX] (Kontekstteki [Benzerlik: %XX] değerini aynen yaz)
 
 UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcut değil" yaz. Eğer kontekstte herhangi bir sayısal veri veya dönem bilgisi varsa, onu kullanarak mutlaka cevap ver."""
@@ -182,6 +182,32 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             return None
         lo, hi = min(nums), max(nums)
         return str(lo) if lo == hi else f"{lo}-{hi}"
+
+    @staticmethod
+    def _sanitize_header(raw: Optional[str], max_len: int = 80) -> Optional[str]:
+        """
+        Gerçek başlık değilse (çok uzun cümle, fiil içeren paragraf vb.) None döner.
+        Composite header'daki her parçayı ayrı kontrol eder.
+        """
+        if not raw or not raw.strip():
+            return None
+
+        parts = [p.strip() for p in raw.split(" > ")]
+        clean: list[str] = []
+        for p in parts:
+            if not p:
+                continue
+            if re.match(r"(?i)^(İstihbarat Raporu|Sayfa\s+\d+)", p):
+                continue
+            if len(p) > max_len:
+                continue
+            if p.endswith((":", ";", ".", "gibidir:", "şöyledir:")):
+                continue
+            clean.append(p)
+
+        if not clean:
+            return None
+        return " > ".join(clean)
 
     # ================================================================
     # PRIORITY-ORDERED ROUTING RULES
@@ -2520,9 +2546,10 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             sources_with_metadata: List[SourceWithMetadata] = []
             
             for idx, doc in enumerate(reranked_docs):
-                header = None
+                raw_header = None
                 if hasattr(doc, 'metadata') and doc.metadata:
-                    header = doc.metadata.get('header')
+                    raw_header = doc.metadata.get('header')
+                header = self._sanitize_header(raw_header)
                 
                 doc_type = self._resolve_doc_type(doc)
                 doc_meta = getattr(doc, "metadata", None) or {}
@@ -2719,9 +2746,10 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             sources_with_metadata: List[SourceWithMetadata] = []
             
             for idx, doc in enumerate(reranked_docs):
-                header = None
+                raw_header = None
                 if hasattr(doc, 'metadata') and doc.metadata:
-                    header = doc.metadata.get('header')
+                    raw_header = doc.metadata.get('header')
+                header = self._sanitize_header(raw_header)
                 
                 doc_type = self._resolve_doc_type(doc)
                 doc_meta = getattr(doc, "metadata", None) or {}
