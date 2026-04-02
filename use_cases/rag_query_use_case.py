@@ -1888,6 +1888,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         top_k: int,
         dict_headers: List[str],
         filename_filters: Optional[List[str]] = None,
+        collection: Optional[str] = None,
     ) -> Tuple[list, Dict]:
         """
         Document-type-aware strict filtered retrieval.
@@ -1919,7 +1920,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 filtered_result = await self.document_repository.search_similar_filtered(
                     embedding=query_embedding,
                     document_ids=scopes,
-                    collection=getattr(query, "collection", None),
+                    collection=collection,
                     top_k=candidate_k,
                 )
                 candidates = filtered_result.documents
@@ -1928,7 +1929,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 candidates = []
             debug["filtered_count"] = len(candidates)
             logger.info(
-                f"📊 Retrieval mode=SCOPED_DOCUMENTS | collection={getattr(query, 'collection', None)} | files={scopes} | candidates={len(candidates)}"
+                f"📊 Retrieval mode=SCOPED_DOCUMENTS | collection={collection} | files={scopes} | candidates={len(candidates)}"
             )
             if not candidates:
                 return [], debug
@@ -1990,10 +1991,10 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 embedding=query_embedding,
                 top_k=candidate_k,
                 threshold=0.0,
-                collection=getattr(query, "collection", None),
+                collection=collection,
             )
             candidates = search_result.documents
-            debug["retrieval_mode"] = "COLLECTION" if getattr(query, "collection", None) else "GLOBAL"
+            debug["retrieval_mode"] = "COLLECTION" if collection else "GLOBAL"
             logger.info(
                 f"📊 Retrieval mode=GLOBAL | no preferred_type | "
                 f"candidates={len(candidates)}"
@@ -2004,7 +2005,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 filtered_result = await self.document_repository.search_similar_filtered(
                     embedding=query_embedding,
                     doc_type=preferred_type,
-                    collection=getattr(query, "collection", None),
+                    collection=collection,
                     top_k=candidate_k
                 )
                 filtered_docs = filtered_result.documents
@@ -2031,7 +2032,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                     embedding=query_embedding,
                     top_k=candidate_k,
                     threshold=0.0,
-                    collection=getattr(query, "collection", None),
+                    collection=collection,
                 )
                 candidates = global_result.documents
                 debug["retrieval_mode"] = "FILTERED_FALLBACK"
@@ -2216,7 +2217,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
         """
         
         try:
-            logger.info(f"🔍 Processing query: {query.query[:50]}... [User: {query.user_id}]")
+            logger.info(f"🔍 Processing query: {query.query[:50]}... [User: {query.user_id}] [Collection: {getattr(query, 'collection', None)}]")
 
             # Step 1: Sorguyu embedding'e çevir
             logger.info("📊 Embedding query...")
@@ -2236,13 +2237,14 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             q_lo = query.query.lower()
             is_bi = "banka istihbarat" in q_lo or "diğer bankalarda" in q_lo or "diğer bankalar" in q_lo
             effective_k = min(25, max(query.top_k, 18)) if is_bi else query.top_k
-            logger.info(f"🔎 Retrieving documents (final_k={effective_k})...")
+            logger.info(f"🔎 Retrieving documents (final_k={effective_k}, collection={getattr(query, 'collection', None)})...")
             reranked_docs, debug_info = await self._retrieve_documents(
                 query_embedding=query_embedding,
                 query_text=query.query,
                 top_k=effective_k,
                 dict_headers=dict_headers,
                 filename_filters=self._resolve_scoped_filenames(query),
+                collection=getattr(query, "collection", None),
             )
 
             # Bank-scope guardrail — deterministic safe answer, no LLM call
@@ -2708,13 +2710,14 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             q_lo = query.query.lower()
             is_bi = "banka istihbarat" in q_lo or "diğer bankalarda" in q_lo or "diğer bankalar" in q_lo
             effective_k = min(25, max(query.top_k, 18)) if is_bi else query.top_k
-            logger.info(f"🔎 Retrieving documents (final_k={effective_k})...")
+            logger.info(f"🔎 Retrieving documents (final_k={effective_k}, collection={getattr(query, 'collection', None)})...")
             reranked_docs, debug_info = await self._retrieve_documents(
                 query_embedding=query_embedding,
                 query_text=query.query,
                 top_k=effective_k,
                 dict_headers=dict_headers,
                 filename_filters=self._resolve_scoped_filenames(query),
+                collection=getattr(query, "collection", None),
             )
 
             # Bank-scope guardrail — deterministic safe answer, no LLM call
