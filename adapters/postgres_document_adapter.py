@@ -56,6 +56,7 @@ class DocumentModel(Base):
     file_type = Column(String(50), default="pdf")
     file_size = Column(Integer, default=0)
     chunk_index = Column(Integer, default=0)
+    collection = Column(String(255), nullable=True, index=True)
     content = Column(Text, nullable=True)
     source = Column(String(255), nullable=True)
     content_hash = Column(String(64), nullable=True)
@@ -270,6 +271,7 @@ class PostgresDocumentAdapter(IDocumentRepository):
                     content=document.content,
                     embedding=document.embedding,
                     doc_metadata=document.metadata,
+                    collection=getattr(document, "collection", None),
                     created_at=datetime.utcnow()
                 )
                 session.add(db_doc)
@@ -298,6 +300,7 @@ class PostgresDocumentAdapter(IDocumentRepository):
                         content=doc.content,
                         embedding=doc.embedding,
                         doc_metadata=doc.metadata,
+                        collection=getattr(doc, "collection", None),
                         created_at=datetime.utcnow()
                     )
                     for doc in documents
@@ -389,12 +392,12 @@ class PostgresDocumentAdapter(IDocumentRepository):
         self,
         embedding: List[float],
         top_k: int = 5,
-        threshold: float = 0.0
+        threshold: float = 0.0,
+        collection: Optional[str] = None
     ) -> SearchResult:
-        """pgvector L2 distance ile benzer dokümanları ara"""
+        """pgvector cosine distance ile benzer dokümanları ara"""
         async with await self._get_session() as session:
             try:
-                # pgvector L2 distance query
                 distance = DocumentModel.embedding.cosine_distance(embedding)
                 
                 query = (
@@ -408,9 +411,13 @@ class PostgresDocumentAdapter(IDocumentRepository):
                             " AND lower(filename) NOT LIKE '%dictionary%'"
                         )
                     )
-                    .order_by(distance)
-                    .limit(top_k)
                 )
+
+                if collection and collection.strip():
+                    query = query.where(DocumentModel.collection == collection.strip())
+                    logger.info(f"🔍 Collection filter: {collection.strip()}")
+
+                query = query.order_by(distance).limit(top_k)
                 
                 result = await session.execute(query)
                 rows = result.fetchall()
@@ -448,9 +455,10 @@ class PostgresDocumentAdapter(IDocumentRepository):
         document_id: Optional[str] = None,
         document_ids: Optional[List[str]] = None,
         doc_type: Optional[str] = None,
+        collection: Optional[str] = None,
         top_k: int = 5
     ) -> SearchResult:
-        """Document ID(ler) veya doc_type'a göre filtered search"""
+        """Document ID(ler), doc_type veya collection'a göre filtered search"""
         async with await self._get_session() as session:
             try:
                 distance = DocumentModel.embedding.cosine_distance(embedding)
@@ -467,6 +475,10 @@ class PostgresDocumentAdapter(IDocumentRepository):
                         )
                     )
                 )
+
+                if collection and collection.strip():
+                    query = query.where(DocumentModel.collection == collection.strip())
+                    logger.info(f"🔍 Collection filter: {collection.strip()}")
 
                 scoped: List[str] = []
                 if document_ids:
@@ -488,7 +500,7 @@ class PostgresDocumentAdapter(IDocumentRepository):
                         )
                     )
                     logger.info(f"🔍 Filtered search by doc_type: {doc_type}")
-                else:
+                elif not collection:
                     logger.info("🔍 Global search (no filter)")
 
                 query = query.order_by(distance).limit(top_k)
