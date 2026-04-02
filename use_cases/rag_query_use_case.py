@@ -134,11 +134,17 @@ BANKA İSTİHBARATI VE LİMİT RİSK TABLOLARI:
 
 ÇIKTI FORMATI:
 CEVAP: [Detaylı ve kesin yanıt]
-KAYNAKLAR: 
-  - [Dosya: dosya_adı]
-  - [Sayfa: N veya N-M] (Kontekstte [Kaynak ... | Sayfa: ...] satırında verilmişse zorunlu; yoksa bu maddeyi yazma)
-  - [Bölüm: başlık] (Kontekstte [...] içinde kısa başlık varsa yaz; başlık yoksa bu satırı atla)
-  - [Güven: %XX] (Kontekstteki [Benzerlik: %XX] değerini aynen yaz)
+KAYNAKLAR (dosya bazında grupla — aynı dosya adını tekrarlama):
+  📄 dosya_adı_1
+    • Sayfa N | Bölüm: başlık | Güven: %XX
+    • Sayfa M | Güven: %YY
+  📄 dosya_adı_2
+    • Sayfa K | Bölüm: başlık | Güven: %ZZ
+Kurallar:
+  - Aynı dosyadan birden fazla kaynak varsa dosya adını sadece bir kez yaz, altına sayfa/bölüm/güven satırları ekle.
+  - Sayfa: kontekstte [Kaynak ... | Sayfa: ...] varsa zorunlu; yoksa yazma.
+  - Bölüm: kontekstte kısa başlık varsa yaz; yoksa atla.
+  - Güven: kontekstteki [Benzerlik: %XX] değerini aynen yaz.
 
 UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcut değil" yaz. Eğer kontekstte herhangi bir sayısal veri veya dönem bilgisi varsa, onu kullanarak mutlaka cevap ver."""
 
@@ -1913,6 +1919,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 filtered_result = await self.document_repository.search_similar_filtered(
                     embedding=query_embedding,
                     document_ids=scopes,
+                    collection=getattr(query, "collection", None),
                     top_k=candidate_k,
                 )
                 candidates = filtered_result.documents
@@ -1921,7 +1928,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 candidates = []
             debug["filtered_count"] = len(candidates)
             logger.info(
-                f"📊 Retrieval mode=SCOPED_DOCUMENTS | files={scopes} | candidates={len(candidates)}"
+                f"📊 Retrieval mode=SCOPED_DOCUMENTS | collection={getattr(query, 'collection', None)} | files={scopes} | candidates={len(candidates)}"
             )
             if not candidates:
                 return [], debug
@@ -1982,10 +1989,11 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
             search_result = await self.document_repository.search_similar(
                 embedding=query_embedding,
                 top_k=candidate_k,
-                threshold=0.0
+                threshold=0.0,
+                collection=getattr(query, "collection", None),
             )
             candidates = search_result.documents
-            debug["retrieval_mode"] = "GLOBAL"
+            debug["retrieval_mode"] = "COLLECTION" if getattr(query, "collection", None) else "GLOBAL"
             logger.info(
                 f"📊 Retrieval mode=GLOBAL | no preferred_type | "
                 f"candidates={len(candidates)}"
@@ -1996,6 +2004,7 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 filtered_result = await self.document_repository.search_similar_filtered(
                     embedding=query_embedding,
                     doc_type=preferred_type,
+                    collection=getattr(query, "collection", None),
                     top_k=candidate_k
                 )
                 filtered_docs = filtered_result.documents
@@ -2021,7 +2030,8 @@ UYARI: SADECE kontekstte soruyla hiç ilgili veri bulunmadığında "Bilgi mevcu
                 global_result = await self.document_repository.search_similar(
                     embedding=query_embedding,
                     top_k=candidate_k,
-                    threshold=0.0
+                    threshold=0.0,
+                    collection=getattr(query, "collection", None),
                 )
                 candidates = global_result.documents
                 debug["retrieval_mode"] = "FILTERED_FALLBACK"
