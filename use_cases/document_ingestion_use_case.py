@@ -522,7 +522,7 @@ class DocumentIngestionUseCase:
 
         return chunks
  
-    async def execute(self, file_path: str, filename: str) -> DocumentIngestionResult:
+    async def execute(self, file_path: str, filename: str, collection: Optional[str] = None) -> DocumentIngestionResult:
 
         """
 
@@ -533,6 +533,8 @@ class DocumentIngestionUseCase:
             file_path: Dosyanın tam yolu
 
             filename: Orijinal dosya adı
+
+            collection: Dokümanın ait olduğu koleksiyon (ör. 'kredi', 'egitim')
 
         Returns:
 
@@ -689,6 +691,7 @@ class DocumentIngestionUseCase:
                         content=chunk,
                         embedding=embedding,
                         metadata=meta,
+                        collection=collection,
                     )
                 )
 
