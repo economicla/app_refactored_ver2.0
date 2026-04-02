@@ -51,11 +51,13 @@ class RAGQueryRequest(BaseModel):
 
 class ScopedRAGQueryRequest(BaseModel):
 
-    """Sadece belirtilen dosya(lar)da RAG — filenames zorunlu (entegrasyon / kredi botları için)."""
+    """Sadece belirtilen dosya(lar)da veya koleksiyonda RAG."""
 
     query: str = Field(..., min_length=1, max_length=5000)
 
-    filenames: List[str] = Field(..., min_length=1, description="En az bir ingest edilmiş dosya adı")
+    filenames: Optional[List[str]] = Field(default=None, description="Dosya adları ile filtrele")
+
+    collection: Optional[str] = Field(default=None, description="Koleksiyon adı ile filtrele (ör. 'kredi', 'egitim')")
 
     top_k: int = Field(default=10, ge=1, le=20)
 
