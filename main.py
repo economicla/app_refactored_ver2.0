@@ -9,6 +9,7 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 from pathlib import Path
 
@@ -21,22 +22,48 @@ from app_refactored.di import DIContainer
 from app_refactored.web_api import router, set_di_container
 from app_refactored.infra.redis_client import redis_client
 
-# Load environment variables from environment.env file
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-
 env_path = Path(__file__).parent / "environment.env"
-
 load_dotenv(dotenv_path=str(env_path))
- 
+
+
+def _setup_logging() -> None:
+    """Konsola her zaman; LOG_FILE tanımlıysa döner dosyaya da yazar."""
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    level_name = (os.getenv("LOG_LEVEL") or "info").upper()
+    level = getattr(logging, level_name, None)
+    if not isinstance(level, int):
+        level = logging.INFO
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    log_file = (os.getenv("LOG_FILE") or "").strip()
+    if log_file:
+        path = Path(log_file).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            max_bytes = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))
+        except ValueError:
+            max_bytes = 10 * 1024 * 1024
+        try:
+            backup_count = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+        except ValueError:
+            backup_count = 5
+        handlers.append(
+            RotatingFileHandler(
+                path,
+                maxBytes=max(1, max_bytes),
+                backupCount=max(1, backup_count),
+                encoding="utf-8",
+            )
+        )
+    logging.basicConfig(level=level, format=fmt, handlers=handlers, force=True)
+
+
+_setup_logging()
+
 logger = logging.getLogger(__name__)
 
 logger.info(f"Environment file loaded from: {env_path}")
+if (os.getenv("LOG_FILE") or "").strip():
+    logger.info(f"File logging enabled: {Path(os.getenv('LOG_FILE', '').strip()).expanduser()}")
 
 # Global DIContainer
 _container: Optional[DIContainer] = None
