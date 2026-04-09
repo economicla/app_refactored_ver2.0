@@ -106,6 +106,14 @@ Birden fazla doküman türünden chunk varsa, sorunun amacına en uygun türü t
 - "Limit Risk Bilgileri": Kaynak bazında limit/risk tablosu (Bin TL).
 Soru "piyasa" diyorsa sadece Piyasa İstihbaratı bölümünü, "memzuc" diyorsa sadece Memzuç bölümünü, "banka limit/risk" diyorsa Banka İstihbaratı veya Limit Risk bölümünü kullan.
 
+DİL — ZORUNLU (cevabın dili):
+- Cevabını KULLANICININ SORUSUNUN DİLİNDE yaz. Sorunun dilini tespit et ve bütün cevabı (CEVAP + KAYNAKLAR bölümü dahil) o dilde üret.
+- Türkçe soru → Türkçe cevap. English question → answer entirely in English. سؤال بالعربية → إجابة كاملة بالعربية الفصحى أو العربية العامية المناسبة للسياق المهني.
+- Başka bir dilde sorulursa (Almanca, Fransızca vb.) aynı şekilde o dilde yanıt ver.
+- Soru iki dil karışık ise baskın dile uy; belirsizse sorunun ilk cümlesinin dilini kullan.
+- Kontekstteki doküman metni Türkçe/İngilizce olsa bile, soru hangi dildeyse cevap o dilde olmalı; gerekirse terimleri o dilde açıkla veya kısa parantezle orijinali belirt.
+- Çıktı başlıkları: Türkçe soruda "CEVAP:" / "KAYNAKLAR:"; English "ANSWER:" / "SOURCES:"; Arabic "الإجابة:" / "المصادر:" — soru diline uygun etiket kullan.
+
 TEMEL KURALLAR:
 1. SADECE verilen kontekstteki bilgiyi kullan
 2. Kontekstte sayısal veriler, dönem bilgileri veya ilgili kalemler VARSA kesinlikle cevapla - "Bilgi mevcut değil" YAZMA
@@ -113,9 +121,9 @@ TEMEL KURALLAR:
 4. Cevapları kesin, net ve profesyonel yap
 5. Her cevabın sonunda kaynak bilgisini ekle
 6. Dünyanın en iyi kredi uzmanı gibi cevaplarını üret
-7. Soruyu İngilizce sorarsam İngilizce cevap ver. Türkçe sorarsam Türkçe cevap ver
+7. Yukarıdaki DİL kurallarına mutlaka uy; varsayılan dil Türkçe DEĞİLDİR — sorunun dilidir
 8. Kolay anlaşılır çıktılar üret
-9. Profesyonel bir biçimde yanıt ver, kullandığın dil resmi bir dil olsun
+9. Profesyonel bir biçimde yanıt ver, kullandığın dil resmi ve tutarlı olsun
 10. Dönemler arası karşılaştırma istendiğinde, değerleri tablo veya liste halinde sun
 11. Soruda geçen dönem kontekstte yoksa, "Bilgi mevcut değil" YAZMA, bunun yerine kontekstteki mevcut dönemleri belirt ve o dönemlerin verilerini sun. Örneğin: "Soruda belirtilen 2024/6 dönemi verilerde bulunmamaktadır. Mevcut dönemler: 2023/12, 2024/12, 2025/6. Bu dönemlere ait veriler şöyledir: ..."
 
@@ -2654,12 +2662,16 @@ SORU: {query.query}
 
 YANIT (kesin, kaynaklı ve profesyonel):"""
 
-            # Step 5: LLM'den yanıt al (Temperature=0 - kesin yanıtlar)
-            logger.info("🤖 Generating response from LLM (temperature=0)...")
+            # Step 5: LLM'den yanıt al
+            active_system_prompt = getattr(query, "system_prompt", None) or self.SYSTEM_PROMPT
+            active_temperature = getattr(query, "temperature", 0) if getattr(query, "system_prompt", None) else 0
+            if getattr(query, "system_prompt", None):
+                logger.info("🎨 Custom system_prompt aktif (pipe override)")
+            logger.info(f"🤖 Generating response from LLM (temperature={active_temperature})...")
             answer = await self.llm_service.generate_response(
                 prompt=prompt,
-                system_prompt=self.SYSTEM_PROMPT,
-                temperature=0,  # KESIN YANITLAR (query.temperature'den bağımsız)
+                system_prompt=active_system_prompt,
+                temperature=active_temperature,
                 max_tokens=2000
             )
 
@@ -2857,10 +2869,12 @@ YANIT (kesin, kaynaklı ve profesyonel):"""
             yield "\n" + "="*70 + "\n\n"
             
             # Stream cevapları gönder
+            active_system_prompt = getattr(query, "system_prompt", None) or self.SYSTEM_PROMPT
+            active_temperature = getattr(query, "temperature", 0) if getattr(query, "system_prompt", None) else 0
             async for chunk in self.llm_service.stream_response(
                 prompt=prompt,
-                system_prompt=self.SYSTEM_PROMPT,
-                temperature=0,  # KESIN YANITLAR
+                system_prompt=active_system_prompt,
+                temperature=active_temperature,
                 max_tokens=2000
             ):
                 yield chunk
