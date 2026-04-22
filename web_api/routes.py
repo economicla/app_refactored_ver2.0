@@ -288,6 +288,7 @@ async def _execute_rag_query(
     request: RAGQueryRequest,
     container: DIContainer,
     collection: Optional[str] = None,
+    system_prompt: Optional[str] = None,
 ) -> RAGQueryResponse:
     """Ortak RAG çalıştırma (global, filename/filenames veya collection ile kapsamlı)."""
     import time
@@ -300,9 +301,10 @@ async def _execute_rag_query(
         query=request.query,
         top_k=request.top_k,
         temperature=request.temperature,
-        filename=request.filename,
+        filename=getattr(request, "filename", None),
         filenames=request.filenames,
         collection=collection,
+        system_prompt=system_prompt,
     )
     result = await rag_use_case.execute(query)
 
@@ -407,7 +409,12 @@ async def query_documents_scoped(
             filename=None,
             filenames=request.filenames,
         )
-        return await _execute_rag_query(unified, container, collection=request.collection)
+        return await _execute_rag_query(
+            unified,
+            container,
+            collection=request.collection,
+            system_prompt=request.system_prompt,
+        )
     except Exception as e:
         logger.error(f"❌ Scoped query failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -704,6 +711,26 @@ async def ingest_document(
 
         result = await ingestion_use_case.execute(temp_file_path, file.filename, collection=collection)
 
+        if result.status != "success" or result.error:
+            detail = (result.error or "").strip() or "Ingestion failed"
+            el = detail.lower()
+            if any(
+                s in el
+                for s in (
+                    "connect",
+                    "connection",
+                    "timeout",
+                    "refused",
+                    "embedding",
+                    "jina",
+                    "httpx",
+                    "unavailable",
+                    "resolve",
+                )
+            ):
+                raise HTTPException(status_code=503, detail=detail)
+            raise HTTPException(status_code=500, detail=detail)
+
         return DocumentIngestionResponse(
 
             status=result.status,
@@ -719,6 +746,10 @@ async def ingest_document(
             error=result.error
 
         )
+
+    except HTTPException:
+
+        raise
 
     except Exception as e:
 
