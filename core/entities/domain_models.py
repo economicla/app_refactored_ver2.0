@@ -64,6 +64,8 @@ class RAGQuery:
     filenames: Optional[List[str]] = None
 
     collection: Optional[str] = None
+
+    system_prompt: Optional[str] = None
  
  
 @dataclass
