@@ -412,8 +412,8 @@ async def query_documents_scoped(
         return await _execute_rag_query(
             unified,
             container,
-            collection=request.collection,
-            system_prompt=request.system_prompt,
+            collection=getattr(request, "collection", None),
+            system_prompt=getattr(request, "system_prompt", None),
         )
     except Exception as e:
         logger.error(f"❌ Scoped query failed: {str(e)}")
