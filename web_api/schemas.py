@@ -61,7 +61,12 @@ class ScopedRAGQueryRequest(BaseModel):
 
     top_k: int = Field(default=10, ge=1, le=20)
 
-    temperature: float = Field(default=0.7, ge=0.0, le=1.0)
+    temperature: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    system_prompt: Optional[str] = Field(
+        default=None,
+        description="Özel sistem promptu; verilirse varsayılan prompt'un yerine kullanılır",
+    )
 
 
 # ============ RESPONSE SCHEMAS ============
