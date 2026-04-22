@@ -711,26 +711,6 @@ async def ingest_document(
 
         result = await ingestion_use_case.execute(temp_file_path, file.filename, collection=collection)
 
-        if result.status != "success" or result.error:
-            detail = (result.error or "").strip() or "Ingestion failed"
-            el = detail.lower()
-            if any(
-                s in el
-                for s in (
-                    "connect",
-                    "connection",
-                    "timeout",
-                    "refused",
-                    "embedding",
-                    "jina",
-                    "httpx",
-                    "unavailable",
-                    "resolve",
-                )
-            ):
-                raise HTTPException(status_code=503, detail=detail)
-            raise HTTPException(status_code=500, detail=detail)
-
         return DocumentIngestionResponse(
 
             status=result.status,
