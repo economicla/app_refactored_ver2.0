@@ -57,6 +57,8 @@ class ScopedRAGQueryRequest(BaseModel):
 
     filenames: Optional[List[str]] = Field(default=None, description="Dosya adları ile filtrele")
 
+    unit: Optional[str] = Field(default=None, description="Birim/departman adı ile filtrele (ör. 'krediler', 'egitim')")
+
     collection: Optional[str] = Field(default=None, description="Koleksiyon adı ile filtrele (ör. 'kredi', 'egitim')")
 
     top_k: int = Field(default=10, ge=1, le=20)
@@ -65,7 +67,7 @@ class ScopedRAGQueryRequest(BaseModel):
 
     system_prompt: Optional[str] = Field(
         default=None,
-        description="Özel sistem promptu; verilirse varsayılan prompt'un yerine kullanılır",
+        description="Doküman tipine/RAG botuna özel ek talimatlar; backend genel sistem promptunu ezmez, en alta eklenir",
     )
 
 
@@ -78,6 +80,8 @@ class DocumentChunkResponse(BaseModel):
     id: Optional[int] = None
 
     filename: str
+
+    unit: Optional[str] = None
 
     chunk_index: int
 
