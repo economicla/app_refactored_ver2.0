@@ -36,6 +36,8 @@ class DocumentChunk:
 
     created_at: Optional[datetime] = None
 
+    unit: Optional[str] = None
+
     collection: Optional[str] = None
  
     def __post_init__(self):
@@ -62,6 +64,8 @@ class RAGQuery:
     filename: Optional[str] = None
 
     filenames: Optional[List[str]] = None
+
+    unit: Optional[str] = None
 
     collection: Optional[str] = None
 
