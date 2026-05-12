@@ -522,7 +522,13 @@ class DocumentIngestionUseCase:
 
         return chunks
  
-    async def execute(self, file_path: str, filename: str, collection: Optional[str] = None) -> DocumentIngestionResult:
+    async def execute(
+        self,
+        file_path: str,
+        filename: str,
+        collection: Optional[str] = None,
+        unit: Optional[str] = None,
+    ) -> DocumentIngestionResult:
 
         """
 
@@ -534,7 +540,8 @@ class DocumentIngestionUseCase:
 
             filename: Orijinal dosya adı
 
-            collection: Dokümanın ait olduğu koleksiyon (ör. 'kredi', 'egitim')
+            collection: Dokümanın ait olduğu koleksiyon (ör. 'karesi', 'prosedur')
+            unit: Dokümanın ait olduğu birim/departman (ör. 'krediler', 'egitim')
 
         Returns:
 
@@ -549,7 +556,11 @@ class DocumentIngestionUseCase:
 
             # Step 0: Aynı dosyanın eski chunk'larını temizle (re-upload desteği)
             try:
-                deleted_count = await self.document_repository.delete_by_filename(filename)
+                deleted_count = await self.document_repository.delete_by_filename(
+                    filename,
+                    unit=unit,
+                    collection=collection,
+                )
                 if deleted_count > 0:
                     logger.info(f"🗑️ Deleted {deleted_count} old chunks for {filename}")
             except Exception as del_err:
@@ -691,6 +702,7 @@ class DocumentIngestionUseCase:
                         content=chunk,
                         embedding=embedding,
                         metadata=meta,
+                        unit=unit,
                         collection=collection,
                     )
                 )
