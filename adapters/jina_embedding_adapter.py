@@ -175,24 +175,38 @@ class JinaEmbeddingAdapter(IEmbeddingService):
  
     async def is_available(self) -> bool:
 
-        """Jina servisinin çalışıp çalışmadığını kontrol et - async"""
+        """Jina servisinin çalışıp çalışmadığını kontrol et.
+
+        Önce GET /health (birçok kurulumda yok veya 404). Başarısızsa
+        gerçek /embed/text ile tek kelimelik probe — startup loglarında
+        yanlış 'not responding' olmasını önler.
+        """
 
         try:
-
             response = await self.client.get(
-
                 self.health_endpoint,
-
-                timeout=httpx.Timeout(5)
-
+                timeout=httpx.Timeout(5.0),
             )
-
-            return response.status_code == 200
-
+            if response.status_code == 200:
+                return True
         except Exception as e:
+            logger.debug(f"Jina GET /health skipped: {e}")
 
-            logger.warning(f"Jina health check failed: {str(e)}")
-
+        try:
+            probe = await self.client.post(
+                self.endpoint,
+                json={"model": self.model, "texts": ["ping"]},
+                timeout=httpx.Timeout(15.0),
+            )
+            probe.raise_for_status()
+            data = probe.json()
+            embeddings = data.get("embeddings") or []
+            ok = bool(embeddings) and isinstance(embeddings[0], list) and len(embeddings[0]) > 0
+            if ok:
+                logger.debug("Jina availability: OK via /embed/text probe")
+            return ok
+        except Exception as e:
+            logger.warning(f"Jina health check failed: {e}")
             return False
  
     async def close(self):
