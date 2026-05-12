@@ -7,7 +7,6 @@ Dependency Injection ile Use Case'leri tetikler
 """
  
 import logging
-import unicodedata
 import hashlib
 import time
 import uuid
@@ -29,7 +28,9 @@ from fastapi import (
 
     Depends, 
 
-    HTTPException, 
+    HTTPException,
+
+    Query,
 
     Request, 
 
@@ -287,6 +288,7 @@ async def health_check(container: DIContainer = Depends(get_di_container)):
 async def _execute_rag_query(
     request: RAGQueryRequest,
     container: DIContainer,
+    unit: Optional[str] = None,
     collection: Optional[str] = None,
     system_prompt: Optional[str] = None,
 ) -> RAGQueryResponse:
@@ -294,7 +296,7 @@ async def _execute_rag_query(
     import time
 
     start_time = time.time()
-    logger.info(f"📥 RAG Query: {request.query[:50]}... (collection={collection})")
+    logger.info(f"📥 RAG Query: {request.query[:50]}... (unit={unit}, collection={collection})")
 
     rag_use_case = container.get_rag_query_use_case()
     query = RAGQuery(
@@ -303,6 +305,7 @@ async def _execute_rag_query(
         temperature=request.temperature,
         filename=getattr(request, "filename", None),
         filenames=request.filenames,
+        unit=unit,
         collection=collection,
         system_prompt=system_prompt,
     )
@@ -312,6 +315,7 @@ async def _execute_rag_query(
         DocumentChunkResponse(
             id=doc.chunk_index,
             filename=doc.filename,
+            unit=getattr(doc, "unit", None),
             chunk_index=doc.chunk_index,
             content=doc.content_preview,
             similarity_score=doc.similarity_score,
@@ -348,37 +352,6 @@ async def _execute_rag_query(
 
     return response
 
-
-@router.post("/query", response_model=RAGQueryResponse)
-
-async def query_documents(
-
-    request: RAGQueryRequest,
-
-    container: DIContainer = Depends(get_di_container)
-
-):
-
-    """
-
-    RAG Sorgusu - Dokümanlardan cevap bul
-
-    - Sorguyu embedding'e çevir
-
-    - Benzer dokümanları ara
-
-    - LLM'den cevap al
-
-    - Opsiyonel: filename veya filenames ile sadece belirli ingest dosyalarında ara
-
-    """
-    try:
-        return await _execute_rag_query(request, container)
-    except Exception as e:
-        logger.error(f"❌ Query failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.post("/query/scoped", response_model=RAGQueryResponse)
 
 async def query_documents_scoped(
@@ -391,15 +364,15 @@ async def query_documents_scoped(
 
     """
 
-    Kapsamlı RAG — dosya adları ve/veya koleksiyon ile filtrelenmiş arama.
+    Kapsamlı RAG — birim, dosya adları ve/veya koleksiyon ile filtrelenmiş arama.
 
-    collection veya filenames'den en az biri verilmelidir.
+    unit, collection veya filenames'den en az biri verilmelidir.
 
     """
-    if not request.filenames and not request.collection:
+    if not request.filenames and not request.collection and not getattr(request, "unit", None):
         raise HTTPException(
             status_code=422,
-            detail="filenames veya collection parametrelerinden en az biri gereklidir.",
+            detail="filenames, collection veya unit parametrelerinden en az biri gereklidir.",
         )
     try:
         unified = RAGQueryRequest(
@@ -412,6 +385,7 @@ async def query_documents_scoped(
         return await _execute_rag_query(
             unified,
             container,
+            unit=getattr(request, "unit", None),
             collection=getattr(request, "collection", None),
             system_prompt=getattr(request, "system_prompt", None),
         )
@@ -506,107 +480,6 @@ async def stream_query_generator(
         logger.error(f"❌ Stream query failed: {str(e)}")
 
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
- 
-
-@router.post("/query/filtered")
-
-async def query_filtered(
-
-    request: RAGQueryRequest,
-
-    document_filter: Optional[str] = None,
-
-    container: DIContainer = Depends(get_di_container)
-
-):
-
-    """
-
-    Belirli bir dokümanda arama yap (metadata filtering)
-
-    Query params:
-
-    - document_filter: İsteğe bağlı, sadece bu dosyada ara (filename)
-
-    Örnek: POST /api/v2/query/filtered?document_filter=my_doc.pdf
-
-    """
-
-    try:
-
-        import time
-
-        start_time = time.time()
-
-        repository = container.get_document_repository()
-        embedding_service = container.get_embedding_service()
-
-        #Query text'i embed et (Jina kullanarak)
-        query_embedding = await embedding_service.embed_text(request.query)
-        
-        # Filtered search
-
-        search_result = await repository.search_similar_filtered(
-
-            embedding=query_embedding,
-
-            document_id=document_filter,
-
-            top_k=request.top_k
-
-        )
-
-        response_time = int((time.time() - start_time) * 1000)
-
-        # Analytics logging
-
-        answer_preview = search_result.documents[0].content[:500] if search_result.documents else "No results"
-
-        await repository.log_query(
-
-            query_text=request.query,
-
-            answer_preview=answer_preview,
-
-            response_time_ms=response_time,
-
-            chunks_retrieved=len(search_result.documents),
-
-            top_source=search_result.documents[0].filename if search_result.documents else "N/A"
-
-        )
-
-        return {
-
-            "status": "success",
-
-            "query": request.query,
-
-            "filter": document_filter or "global",
-
-            "results": [
-                {
-                    "id": doc.id,
-                    "filename": doc.filename,
-                    "chunk_index": doc.chunk_index,
-                    "content": doc.content[:500],
-                    "similarity_score": doc.similarity_score,
-                    "metadata": doc.metadata
-                }
-                for doc in search_result.documents
-            ],           
-
-            "response_time_ms": response_time
-
-        }
-
-    except Exception as e:
-
-        logger.error(f"Filtered query failed: {e}")
-
-        raise HTTPException(status_code=500, detail=str(e))
- 
-
 
 @router.post("/query/stream")
 
@@ -671,6 +544,8 @@ async def ingest_document(
 
     file: UploadFile = File(...),
 
+    unit: Optional[str] = Form(default=None, description="Birim/departman adı (ör. 'krediler', 'egitim')"),
+
     collection: Optional[str] = Form(default=None, description="Koleksiyon adı (ör. 'kredi', 'egitim')"),
 
     container: DIContainer = Depends(get_di_container)
@@ -683,7 +558,7 @@ async def ingest_document(
 
     Desteklenen formatlar: PDF, DOCX, TXT, XLSX, PPTX
 
-    Opsiyonel: collection parametresi ile dokümanı bir koleksiyona ata
+    Opsiyonel: unit ve collection parametreleri ile dokümanı birim/koleksiyona ata
 
     """
 
@@ -691,7 +566,7 @@ async def ingest_document(
 
     try:
 
-        logger.info(f"📥 Ingesting file: {file.filename} (collection={collection})")
+        logger.info(f"📥 Ingesting file: {file.filename} (unit={unit}, collection={collection})")
 
         # Geçici dosya oluştur
 
@@ -709,7 +584,12 @@ async def ingest_document(
 
         ingestion_use_case = container.get_document_ingestion_use_case()
 
-        result = await ingestion_use_case.execute(temp_file_path, file.filename, collection=collection)
+        result = await ingestion_use_case.execute(
+            temp_file_path,
+            file.filename,
+            collection=collection,
+            unit=unit,
+        )
 
         return DocumentIngestionResponse(
 
@@ -751,206 +631,6 @@ async def ingest_document(
 
                 pass
 
-
-@router.post("/preview-html")
-async def preview_html_conversion(
-    file: UploadFile = File(...)
-):
-    """
-    HTML dokümanının dönüştürülmüş halini önizle (veritabanına KAYDETMEZ).
-    Converter'ın tablo yapılarını doğru parse edip etmediğini kontrol etmek için kullanılır.
-    """
-    temp_file_path = None
-    try:
-        if not file.filename.lower().endswith(('.html', '.htm')):
-            raise HTTPException(status_code=400, detail="Sadece HTML dosyaları desteklenir")
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
-            temp_file_path = tmp.name
-            content = await file.read()
-            with open(temp_file_path, 'wb') as f:
-                f.write(content)
-
-        # HTML'i oku
-        html_content = None
-        for enc in ('utf-8', 'windows-1254', 'latin-1', 'iso-8859-9'):
-            try:
-                with open(temp_file_path, 'r', encoding=enc) as f:
-                    html_content = f.read()
-                break
-            except UnicodeDecodeError:
-                continue
-        if html_content is None:
-            with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                html_content = f.read()
-
-        # Converter ile dönüştür
-        from app_refactored.use_cases.html_structured_converter import HTMLStructuredConverter
-        converter = HTMLStructuredConverter()
-        converted_text = converter.convert(html_content)
-
-        # Chunk'lara ayır (preview amaçlı)
-        from app_refactored.use_cases.intelligent_chunking import IntelligentChunker
-        chunker = IntelligentChunker(chunk_size=1000, chunk_overlap=200)
-        chunks = chunker.chunk(converted_text)
-
-        return {
-            "filename": file.filename,
-            "format_detected": converter._detect_format(
-                __import__('bs4', fromlist=['BeautifulSoup']).BeautifulSoup(html_content, "html.parser")
-            ),
-            "total_chars": len(converted_text),
-            "total_chunks": len(chunks),
-            "full_converted_text": converted_text,
-            "chunks_preview": [
-                {
-                    "chunk_index": i,
-                    "header": c.get("header"),
-                    "content_length": len(c["content"]),
-                    "content": c["content"]
-                }
-                for i, c in enumerate(chunks)
-            ]
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ HTML preview failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            try:
-                os.remove(temp_file_path)
-            except:
-                pass
-
-
-
-@router.post("/debug-query")
-async def debug_query(
-    request: RAGQueryRequest,
-    container: DIContainer = Depends(get_di_container)
-):
-    """
-    DEBUG: Yeni strict filtered retrieval pipeline'ını kullanır.
-    - debug_info: preferred_type, retrieval_mode, filtered_count, top3_chunks
-    - Retrieve + rerank edilen chunk'ların tam içeriğini
-    - Oluşturulan prompt'u gösterir.
-    LLM çağrısı YAPMAZ.
-    """
-    try:
-        logger.info(f"🔍 DEBUG Query: {request.query[:80]}")
-
-        rag_use_case = container.get_rag_query_use_case()
-
-        # Step 1: Embedding
-        query_embedding = await rag_use_case.embedding_service.embed_text(request.query)
-
-        # Step 1.5: Sözlük-destekli sorgu genişletme
-        enhanced_query, dict_headers = await rag_use_case._enhance_query_with_dictionary(
-            request.query, query_embedding
-        )
-        if enhanced_query != request.query:
-            query_embedding = await rag_use_case.embedding_service.embed_text(enhanced_query)
-
-        # Step 2: Strict filtered retrieval + rerank + bank guardrail (LLM'siz)
-        reranked_docs, debug_info = await rag_use_case._retrieve_documents(
-            query_embedding=query_embedding,
-            query_text=request.query,
-            top_k=request.top_k,
-            dict_headers=dict_headers
-        )
-
-        # Bank guardrail may have blocked — surface that clearly
-        bank_guardrail = debug_info.get("bank_guardrail")
-        guardrail_blocked = (
-            bank_guardrail is not None
-            and not bank_guardrail.get("passed", True)
-        )
-
-        if guardrail_blocked:
-            return {
-                "query": request.query,
-                "enhanced_query": enhanced_query if enhanced_query != request.query else None,
-                "debug_info": debug_info,
-                "guardrail_blocked": True,
-                "safe_answer": bank_guardrail.get("safe_answer"),
-                "chunks_retrieved": 0,
-                "chunks_detail": [],
-                "full_prompt_length": 0,
-                "full_prompt": None
-            }
-
-        # Build context + chunks detail
-        context_parts = []
-        chunks_detail = []
-        for idx, doc in enumerate(reranked_docs):
-            header = doc.metadata.get('header') if hasattr(doc, 'metadata') and doc.metadata else None
-            doc_type = rag_use_case._resolve_doc_type(doc)
-            header_text = f" [{header}]" if header else ""
-            context_parts.append(
-                f"[Kaynak {idx+1}: {doc.filename}{header_text}] [Doküman Türü: {doc_type}]\n{doc.content}"
-            )
-            chunks_detail.append({
-                "index": idx,
-                "filename": doc.filename,
-                "chunk_index": doc.chunk_index,
-                "header": header,
-                "doc_type": doc_type,
-                "similarity_score": round(getattr(doc, 'similarity_score', 0), 4),
-                "content_length": len(doc.content),
-                "full_content": doc.content
-            })
-
-        context = "\n\n---\n\n".join(context_parts)
-        prompt = f"""KONTEXT (Aşağıdaki finansal verileri dikkatlice oku ve soruyu cevapla):
-{context}
-
-SORU: {request.query}
-
-YANIT (kesin, kaynaklı ve profesyonel):"""
-
-        # Banka istihbaratı teşhisi: sayfa 5 verisi (yalnızca sayısal marker) + Türkçe İ/i için norm
-        def _norm_tr(s: str) -> str:
-            if not s:
-                return ""
-            s = (s or "").casefold()
-            s = unicodedata.normalize("NFKD", s)
-            return "".join(c for c in s if not unicodedata.combining(c))
-
-        q_lower = request.query.lower()
-        if "banka istihbarat" in q_lower or "diğer bankalarda" in q_lower or "diğer bankalar" in q_lower:
-            bi_headers = sum(
-                1 for c in chunks_detail
-                if c.get("header") and "banka istihbarat" in _norm_tr(c.get("header") or "")
-            )
-            page5_numeric = ("650.000.000", "391.263", "203.000.000")
-            chunks_with_page5 = [
-                c["index"] for c in chunks_detail
-                if any(m in (c.get("full_content") or "") for m in page5_numeric)
-            ]
-            debug_info["banka_istihbarati_diagnostic"] = {
-                "chunks_with_bi_header": bi_headers,
-                "chunk_indices_with_page5_data": chunks_with_page5,
-                "page5_in_context": len(chunks_with_page5) > 0,
-                "interpretation": "Sayfa 5 verisi kontekste yok; PDF yeniden yüklenmeli veya extractor devam sayfası atamasını kontrol et." if not chunks_with_page5 else "Sayfa 5 verisi kontekste var; LLM tüm bankaları özetlemiyor olabilir.",
-            }
-
-        return {
-            "query": request.query,
-            "enhanced_query": enhanced_query if enhanced_query != request.query else None,
-            "debug_info": debug_info,
-            "guardrail_blocked": False,
-            "chunks_retrieved": len(reranked_docs),
-            "chunks_detail": chunks_detail,
-            "full_prompt_length": len(prompt),
-            "full_prompt": prompt
-        }
-    except Exception as e:
-        logger.error(f"❌ Debug query failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
- 
 @router.post("/ingest-with-metadata")
 
 async def ingest_with_metadata(
@@ -1121,6 +801,7 @@ async def list_documents(container: DIContainer = Depends(get_di_container)):
             results.append({
                 "id": doc.id,
                 "filename": doc.filename,
+                "unit": getattr(doc, "unit", None),
                 "collection": getattr(doc, "collection", None),
                 "chunk_index": getattr(doc, "chunk_index", 0),
                 "created_at": created,
@@ -1200,68 +881,29 @@ async def analytics_dashboard(container: DIContainer = Depends(get_di_container)
 
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.delete("/documents/{doc_id}")
-
-async def delete_document(
-
-    doc_id: int,
-
-    container: DIContainer = Depends(get_di_container)
-
-):
-
-    """
-
-    Dokümantı sil (ID'ye göre)
-
-    Args:
-
-        doc_id: Silinecek dokümantın ID'si
-
-    Returns:
-
-        Silme sonucu
-
-    """
-
-    try:
-
-        repo = container.get_document_repository()
-
-        deleted = await repo.delete(doc_id)
-
-        if deleted:
-
-            logger.info(f"✅ Document deleted: {doc_id}")
-
-            return {"status": "deleted", "id": doc_id}
-
-        else:
-
-            raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
-
-    except Exception as e:
-
-        logger.error(f"❌ Delete failed: {str(e)}")
-
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.delete("/documents/by-filename/{filename}")
 async def delete_document_by_filename(
     filename: str,
+    unit: Optional[str] = Query(default=None, description="Birim filtresi (opsiyonel)"),
+    collection: Optional[str] = Query(default=None, description="Collection filtresi (opsiyonel)"),
     container: DIContainer = Depends(get_di_container)
 ):
     """
-    Dosya adına göre TÜM chunk'ları sil.
-    Örn: DELETE /api/v2/documents/by-filename/topbas-performans.html
+    Dosya adına göre chunk'ları sil. unit/collection verilirse sadece o scope silinir.
+    Örn: DELETE /api/v2/documents/by-filename/topbas-performans.html?unit=krediler&collection=karesi
     """
     try:
         repo = container.get_document_repository()
-        deleted_count = await repo.delete_by_filename(filename)
+        deleted_count = await repo.delete_by_filename(filename, unit=unit, collection=collection)
         if deleted_count > 0:
-            logger.info(f"✅ Deleted {deleted_count} chunks for {filename}")
-            return {"status": "deleted", "filename": filename, "chunks_deleted": deleted_count}
+            logger.info(f"✅ Deleted {deleted_count} chunks for {filename} (unit={unit}, collection={collection})")
+            return {
+                "status": "deleted",
+                "filename": filename,
+                "unit": unit,
+                "collection": collection,
+                "chunks_deleted": deleted_count,
+            }
         else:
             raise HTTPException(status_code=404, detail=f"No documents found for '{filename}'")
     except HTTPException:
@@ -1270,49 +912,6 @@ async def delete_document_by_filename(
         logger.error(f"❌ Delete by filename failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
- 
-@router.get("/info/system", response_model=dict)
-
-async def system_information(container: DIContainer = Depends(get_di_container)):
-
-    """
-
-    System Information - Transparency for C-level demo
-
-    Returns:
-
-        - api_version: API version
-
-        - database: PostgreSQL & pgvector info
-
-        - embedding_service: Jina configuration
-
-        - llm_service: vLLM configuration
-
-        - last_ingestion: Last document ingestion time
-
-        - timestamp: ISO timestamp
-
-    """
-
-    try:
-
-        logger.info("ℹ️ System info requested")
-
-        repo = container.get_document_repository()
-
-        system_info = await repo.get_system_info()
-
-        return system_info
-
-    except Exception as e:
-
-        logger.error(f"❌ System info failed: {str(e)}")
-
-        raise HTTPException(status_code=500, detail=str(e))
- 
- 
- 
 def set_di_container(container: DIContainer):
 
     """DIContainer'ı global olarak set et (app startup'ta çağrılacak)"""
