@@ -76,7 +76,11 @@ class IDocumentRepository(ABC):
 
         top_k: int = 5,
 
-        threshold: float = 0.0
+        threshold: float = 0.0,
+
+        unit: Optional[str] = None,
+
+        collection: Optional[str] = None
 
     ) -> SearchResult:
 
@@ -150,6 +154,10 @@ class IDocumentRepository(ABC):
 
         doc_type: Optional[str] = None,
 
+        unit: Optional[str] = None,
+
+        collection: Optional[str] = None,
+
         top_k: int = 5
 
     ) -> SearchResult:
@@ -167,6 +175,10 @@ class IDocumentRepository(ABC):
             document_ids: Opsiyonel birden fazla dosya adı (document_id ile birlikte verilirse birleştirilir)
 
             doc_type: Opsiyonel doküman türü filtresi (metadata doc_type)
+
+            unit: Opsiyonel birim/departman filtresi
+
+            collection: Opsiyonel collection filtresi
 
             top_k: Döndürülecek en iyi k sonuç
 
@@ -252,7 +264,12 @@ class IDocumentRepository(ABC):
  
     @abstractmethod
 
-    async def delete_by_filename(self, filename: str) -> int:
+    async def delete_by_filename(
+        self,
+        filename: str,
+        unit: Optional[str] = None,
+        collection: Optional[str] = None,
+    ) -> int:
 
         """
 
@@ -261,6 +278,8 @@ class IDocumentRepository(ABC):
         Args:
 
             filename: Doküman dosya adı
+            unit: Opsiyonel birim filtresi
+            collection: Opsiyonel collection filtresi
 
         Returns:
 
