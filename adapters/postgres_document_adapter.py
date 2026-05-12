@@ -56,6 +56,7 @@ class DocumentModel(Base):
     file_type = Column(String(50), default="pdf")
     file_size = Column(Integer, default=0)
     chunk_index = Column(Integer, default=0)
+    unit = Column(String(255), nullable=True, index=True)
     collection = Column(String(255), nullable=True, index=True)
     content = Column(Text, nullable=True)
     source = Column(String(255), nullable=True)
@@ -246,6 +247,9 @@ class PostgresDocumentAdapter(IDocumentRepository):
                 # Not: run_sync asenkron akışta senkron SQLAlchemy komutlarını çalıştırmak içindir
 
                 await conn.run_sync(Base.metadata.create_all)
+                await conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS unit VARCHAR(255)"))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_documents_unit ON documents (unit)"))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_documents_unit_collection ON documents (unit, collection)"))
 
                 logger.info("✅ Veritabanı şeması başarıyla doğrulandı ve tablolar oluşturuldu.")
 
@@ -271,6 +275,7 @@ class PostgresDocumentAdapter(IDocumentRepository):
                     content=document.content,
                     embedding=document.embedding,
                     doc_metadata=document.metadata,
+                    unit=getattr(document, "unit", None),
                     collection=getattr(document, "collection", None),
                     created_at=datetime.utcnow()
                 )
@@ -300,6 +305,7 @@ class PostgresDocumentAdapter(IDocumentRepository):
                         content=doc.content,
                         embedding=doc.embedding,
                         doc_metadata=doc.metadata,
+                        unit=getattr(doc, "unit", None),
                         collection=getattr(doc, "collection", None),
                         created_at=datetime.utcnow()
                     )
@@ -357,6 +363,10 @@ class PostgresDocumentAdapter(IDocumentRepository):
 
                     doc_metadata=full_metadata,
 
+                    unit=getattr(document, "unit", None),
+
+                    collection=getattr(document, "collection", None),
+
                     created_at=datetime.utcnow()
 
                 )
@@ -393,6 +403,7 @@ class PostgresDocumentAdapter(IDocumentRepository):
         embedding: List[float],
         top_k: int = 5,
         threshold: float = 0.0,
+        unit: Optional[str] = None,
         collection: Optional[str] = None
     ) -> SearchResult:
         """pgvector cosine distance ile benzer dokümanları ara"""
@@ -412,6 +423,10 @@ class PostgresDocumentAdapter(IDocumentRepository):
                         )
                     )
                 )
+
+                if unit and unit.strip():
+                    query = query.where(DocumentModel.unit == unit.strip())
+                    logger.info(f"🔍 Unit filter: {unit.strip()}")
 
                 if collection and collection.strip():
                     query = query.where(DocumentModel.collection == collection.strip())
@@ -434,7 +449,9 @@ class PostgresDocumentAdapter(IDocumentRepository):
                         embedding=db_doc.embedding,
                         similarity_score=float(similarity_score),
                         metadata=db_doc.doc_metadata or {},
-                        created_at=db_doc.created_at
+                        created_at=db_doc.created_at,
+                        unit=db_doc.unit,
+                        collection=db_doc.collection,
                     )
                     documents.append(doc)
                 
@@ -455,6 +472,7 @@ class PostgresDocumentAdapter(IDocumentRepository):
         document_id: Optional[str] = None,
         document_ids: Optional[List[str]] = None,
         doc_type: Optional[str] = None,
+        unit: Optional[str] = None,
         collection: Optional[str] = None,
         top_k: int = 5
     ) -> SearchResult:
@@ -475,6 +493,10 @@ class PostgresDocumentAdapter(IDocumentRepository):
                         )
                     )
                 )
+
+                if unit and unit.strip():
+                    query = query.where(DocumentModel.unit == unit.strip())
+                    logger.info(f"🔍 Unit filter: {unit.strip()}")
 
                 if collection and collection.strip():
                     query = query.where(DocumentModel.collection == collection.strip())
@@ -500,7 +522,7 @@ class PostgresDocumentAdapter(IDocumentRepository):
                         )
                     )
                     logger.info(f"🔍 Filtered search by doc_type: {doc_type}")
-                elif not collection:
+                elif not collection and not unit:
                     logger.info("🔍 Global search (no filter)")
 
                 query = query.order_by(distance).limit(top_k)
@@ -520,7 +542,9 @@ class PostgresDocumentAdapter(IDocumentRepository):
                         embedding=db_doc.embedding,
                         similarity_score=float(similarity_score),
                         metadata=db_doc.doc_metadata or {},
-                        created_at=db_doc.created_at
+                        created_at=db_doc.created_at,
+                        unit=db_doc.unit,
+                        collection=db_doc.collection,
                     )
                     documents.append(doc)
                 logger.info(f"Found {len(documents)} results")
@@ -575,7 +599,9 @@ class PostgresDocumentAdapter(IDocumentRepository):
                         embedding=db_doc.embedding,
                         similarity_score=float(similarity_score),
                         metadata=db_doc.doc_metadata or {},
-                        created_at=db_doc.created_at
+                        created_at=db_doc.created_at,
+                        unit=db_doc.unit,
+                        collection=db_doc.collection,
                     )
                     documents.append(doc)
 
@@ -586,162 +612,6 @@ class PostgresDocumentAdapter(IDocumentRepository):
             except Exception as e:
                 logger.debug(f"📖 Dictionary search not available: {e}")
                 return SearchResult(documents=[], search_time_ms=0.0)
-
-    async def get_bi_lines(
-        self,
-        filename: Optional[str] = None,
-        doc_type: str = "İstihbarat Raporu",
-    ) -> List[Dict[str, str]]:
-        """
-        Banka İstihbaratı içeren chunk'ları getir (deterministik BI tablosu için).
-        content ILIKE '%Banka:%' AND content ILIKE '%Genel Limit:%' olan satırları döner.
-        filename verilirse sadece o dosyadan, yoksa doc_type'a göre (veya tümü) çeker.
-        Returns: [{"content": str, "filename": str}, ...]
-        """
-        async with await self._get_session() as session:
-            try:
-                query = (
-                    select(DocumentModel.filename, DocumentModel.content)
-                    .where(DocumentModel.deleted_at.is_(None))
-                    .where(DocumentModel.content.ilike("%Banka:%"))
-                    .where(DocumentModel.content.ilike("%Genel Limit:%"))
-                )
-                if filename:
-                    query = query.where(DocumentModel.filename == filename)
-                elif doc_type:
-                    query = query.where(
-                        text(
-                            "(doc_metadata->>'doc_type' = :dt OR doc_metadata->>'doc_type' IS NULL)"
-                        ).bindparams(dt=doc_type)
-                    )
-                query = query.order_by(DocumentModel.filename, DocumentModel.chunk_index)
-                result = await session.execute(query)
-                rows = result.fetchall()
-                out = [
-                    {"filename": row[0], "content": row[1] or ""}
-                    for row in rows
-                ]
-                logger.info(f"✅ get_bi_lines: {len(out)} chunks (filename={filename!r})")
-                return out
-            except Exception as e:
-                logger.error(f"❌ get_bi_lines failed: {str(e)}")
-                return []
-
-    async def get_banka_istihbarati_structured(
-        self, filename: Optional[str] = None
-    ) -> Optional[List[Dict[str, Any]]]:
-        """
-        İlk chunk'ın doc_metadata'sında saklanan banka_istihbarati listesini döndür.
-        Tüm banka kayıtlarının deterministik tabloda gösterilmesi için kullanılır.
-        """
-        if not filename:
-            return None
-        async with await self._get_session() as session:
-            try:
-                query = (
-                    select(DocumentModel.doc_metadata)
-                    .where(DocumentModel.filename == filename)
-                    .where(DocumentModel.deleted_at.is_(None))
-                    .order_by(DocumentModel.chunk_index)
-                    .limit(1)
-                )
-                result = await session.execute(query)
-                row = result.fetchone()
-                if not row or not row[0]:
-                    return None
-                meta = row[0] or {}
-                bi = meta.get("banka_istihbarati")
-                if isinstance(bi, list) and bi:
-                    logger.info(f"✅ get_banka_istihbarati_structured: {len(bi)} rows (filename={filename!r})")
-                    return bi
-                return None
-            except Exception as e:
-                logger.error(f"❌ get_banka_istihbarati_structured failed: {str(e)}")
-                return None
-
-    async def get_piyasa_istihbarati_structured(
-        self, filename: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        """
-        İlk chunk'ın doc_metadata'sında saklanan piyasa_istihbarati sözlüğünü döndür.
-        Piyasa istihbaratı sorularında deterministik cevap için kullanılır.
-        """
-        if not filename:
-            return None
-        async with await self._get_session() as session:
-            try:
-                query = (
-                    select(DocumentModel.doc_metadata)
-                    .where(DocumentModel.filename == filename)
-                    .where(DocumentModel.deleted_at.is_(None))
-                    .order_by(DocumentModel.chunk_index)
-                    .limit(1)
-                )
-                result = await session.execute(query)
-                row = result.fetchone()
-                if not row or not row[0]:
-                    return None
-                meta = row[0] or {}
-                piyasa = meta.get("piyasa_istihbarati")
-                if isinstance(piyasa, dict) and piyasa:
-                    logger.info(f"✅ get_piyasa_istihbarati_structured: {len(piyasa)} entries (filename={filename!r})")
-                    return piyasa
-                return None
-            except Exception as e:
-                logger.error(f"❌ get_piyasa_istihbarati_structured failed: {str(e)}")
-                return None
-
-    async def get_memzuc_lines(
-        self,
-        filename: Optional[str] = None,
-        doc_type: str = "İstihbarat Raporu",
-    ) -> List[Dict[str, str]]:
-        """
-        Memzuc / Doluluk Oranı içeren chunk'ları getir (Kredi Grubu Firma Memzucuları tablosu).
-        content içinde 'KREDİ GRUBU FİRMA MEMZUCULARI' veya 'MEMZUC BİLGİLERİ' veya 'Doluluk Oranı'
-        ve dönem formatı (2025/12, 2024/12 vb.) geçen chunk'ları döner.
-        Returns: [{"content": str, "filename": str}, ...]
-        """
-        async with await self._get_session() as session:
-            try:
-                # Memzuc sinyali: structured line veya tablo ifadeleri + dönem formatı 20xx/xx
-                memzuc_cond = text(
-                    "("
-                    " content ILIKE '%MEMZUC_DOLULUK%'"
-                    " OR content ILIKE '%MEMZUC_STRUCTURED_JSON%'"
-                    " OR content ILIKE '%MEMZUC_RISK_STRUCTURED_JSON%'"
-                    " OR content ILIKE '%KREDİ GRUBU FİRMA MEMZUCULARI%'"
-                    " OR content ILIKE '%Kredi Grubu Firma Memzuçları%'"
-                    " OR content ILIKE '%MEMZUC BİLGİLERİ%'"
-                    " OR content ILIKE '%Memzuç — Kredi Grubu%'"
-                    " OR content ILIKE '%Doluluk Oranı%'"
-                    ") AND content ~ '20[0-9]{2}[[:space:]]*/[[:space:]]*[0-9]{2}'"
-                )
-                query = (
-                    select(DocumentModel.filename, DocumentModel.content)
-                    .where(DocumentModel.deleted_at.is_(None))
-                    .where(memzuc_cond)
-                )
-                if filename:
-                    query = query.where(DocumentModel.filename == filename)
-                elif doc_type:
-                    query = query.where(
-                        text(
-                            "(doc_metadata->>'doc_type' = :dt OR doc_metadata->>'doc_type' IS NULL)"
-                        ).bindparams(dt=doc_type)
-                    )
-                query = query.order_by(DocumentModel.filename, DocumentModel.chunk_index)
-                result = await session.execute(query)
-                rows = result.fetchall()
-                out = [
-                    {"filename": row[0], "content": row[1] or ""}
-                    for row in rows
-                ]
-                logger.info(f"✅ get_memzuc_lines: {len(out)} chunks (filename={filename!r})")
-                return out
-            except Exception as e:
-                logger.error(f"❌ get_memzuc_lines failed: {str(e)}")
-                return []
 
     async def get_by_filename(self, filename: str) -> List[DocumentChunk]:
         """Dosya adına göre tüm chunk'ları getir"""
@@ -764,7 +634,9 @@ class PostgresDocumentAdapter(IDocumentRepository):
                         content=db_doc.content,
                         embedding=db_doc.embedding,
                         metadata=db_doc.doc_metadata or {},
-                        created_at=db_doc.created_at
+                        created_at=db_doc.created_at,
+                        unit=db_doc.unit,
+                        collection=db_doc.collection,
                     )
                     for db_doc in db_docs
                 ]
@@ -812,7 +684,9 @@ class PostgresDocumentAdapter(IDocumentRepository):
 
                         metadata=db_doc.doc_metadata or {}, 
 
-                        created_at=db_doc.created_at
+                        created_at=db_doc.created_at,
+                        unit=db_doc.unit,
+                        collection=db_doc.collection,
 
                     )
 
@@ -849,7 +723,9 @@ class PostgresDocumentAdapter(IDocumentRepository):
                     content=db_doc.content,
                     embedding=db_doc.embedding,
                     metadata=db_doc.doc_metadata or {},
-                    created_at=db_doc.created_at
+                    created_at=db_doc.created_at,
+                    unit=db_doc.unit,
+                    collection=db_doc.collection,
                 )
                 
             except Exception as e:
@@ -894,15 +770,24 @@ class PostgresDocumentAdapter(IDocumentRepository):
 
                 raise
  
-    async def delete_by_filename(self, filename: str) -> int:
+    async def delete_by_filename(
+        self,
+        filename: str,
+        unit: Optional[str] = None,
+        collection: Optional[str] = None,
+    ) -> int:
 
-        """Dosya adına göre tüm data'yı sil (cascade)"""
+        """Dosya adına göre chunk'ları sil; unit/collection verilirse aynı scope içinde kalır."""
 
         async with await self._get_session() as session:
 
             try:
 
                 query = select(DocumentModel).where(DocumentModel.filename == filename)
+                if unit and unit.strip():
+                    query = query.where(DocumentModel.unit == unit.strip())
+                if collection and collection.strip():
+                    query = query.where(DocumentModel.collection == collection.strip())
 
                 result = await session.execute(query)
 
@@ -922,7 +807,10 @@ class PostgresDocumentAdapter(IDocumentRepository):
 
                 await session.commit()
 
-                logger.info(f"✅ Deleted {count} docs for {filename}")
+                logger.info(
+                    f"✅ Deleted {count} docs for {filename} "
+                    f"(unit={unit}, collection={collection})"
+                )
 
                 return count
 
