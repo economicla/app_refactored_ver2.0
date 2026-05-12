@@ -456,19 +456,6 @@ app.include_router(router)
 # Health & System Endpoints
 # ============================================================================
 
-@app.get("/")
-async def root():
-    """Root endpoint - system health check"""
-    return {
-        "status": "running",
-        "version": "2.0.0",
-        "architecture": "Clean Architecture with Dependency Injection",
-        "environment": CONFIG['environment'],
-        "port": CONFIG['api_port'],
-        "timestamp": __import__('datetime').datetime.utcnow().isoformat()
-    }
-
-
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -481,25 +468,6 @@ async def health_check():
             "database": "✅ configured"
         }
     }
-
-
-@app.get("/api/v2/config/info")
-async def config_info():
-    """Configuration info endpoint (non-sensitive data)"""
-    return {
-        "environment": CONFIG['environment'],
-        "api_host": CONFIG['api_host'],
-        "api_port": CONFIG['api_port'],
-        "redis_enabled": CONFIG['rate_limit_enabled'],
-        "audit_logging_enabled": CONFIG['enable_audit_logging'],
-        "features": {
-            "analytics": CONFIG['environment'] == 'production',
-            "compliance_reports": CONFIG['enable_audit_logging'],
-            "user_isolation": CONFIG['enable_audit_logging'],
-            "metadata_enrichment": CONFIG['data_classification_enabled']
-        }
-    }
-
 
 # ============================================================================
 # Application Entry Point
